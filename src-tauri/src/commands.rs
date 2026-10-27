@@ -19,6 +19,8 @@ use crate::workspace::Workspace;
 
 pub struct AppState {
     data_dir: PathBuf,
+    /// Games started from GameX, by project id.
+    runs: Mutex<std::collections::HashMap<String, crate::device::Launched>>,
     workspace_root: PathBuf,
     signing_dir: PathBuf,
     settings_path: PathBuf,
@@ -31,6 +33,7 @@ impl AppState {
         AppState {
             workspace_root: data_dir.join("workspace"),
             data_dir: data_dir.clone(),
+            runs: Mutex::new(std::collections::HashMap::new()),
             signing_dir: {
                 crate::toolbox::set_tools_dir(data_dir.join("tools"));
                 data_dir.join("signing")
@@ -439,6 +442,119 @@ pub async fn ai_propose(
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+// ---------------------------------------------------------------------------
+// Running games on an emulator or phone
+
+#[tauri::command]
+pub async fn run_targets() -> Result<Vec<crate::device::Target>, String> {
+    tauri::async_runtime::spawn_blocking(crate::device::targets).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn run_enable_adb(index: u32) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || crate::device::ld_enable_adb(index))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunApk {
+    path: String,
+    package: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunOptions {
+    original: Option<RunApk>,
+    last_build: Option<RunApk>,
+}
+
+fn original_apk(project: &std::path::Path) -> Option<PathBuf> {
+    std::fs::read_dir(project.join("original"))
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .find(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("apk")))
+}
+
+fn last_build(project: &std::path::Path) -> Option<RunApk> {
+    let text = std::fs::read_to_string(project.join("build").join("last.json")).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let path = v["path"].as_str()?.to_string();
+    std::path::Path::new(&path).is_file().then(|| RunApk { package: v["package"].as_str().unwrap_or_default().to_string(), path })
+}
+
+/// The APKs a project can run: the original, and the last build if any.
+#[tauri::command]
+pub fn run_options(state: State<'_, AppState>, id: String) -> Result<RunOptions, String> {
+    let project = state.workspace().project_dir(&id).map_err(|e| e.to_string())?;
+    let original = original_apk(&project).and_then(|p| {
+        let package = crate::axml::apk_package(&p).ok()?;
+        Some(RunApk { path: p.display().to_string(), package })
+    });
+    Ok(RunOptions { original, last_build: last_build(&project) })
+}
+
+/// Starts the target, installs the chosen APK and launches the game.
+/// `apk` is "original" or "build"; `replace` removes an installed copy first.
+#[tauri::command]
+pub async fn run_game(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    target: String,
+    apk: String,
+    replace: bool,
+) -> Result<crate::device::Launched, String> {
+    let project = state.workspace().project_dir(&id).map_err(|e| e.to_string())?;
+    let chosen = match apk.as_str() {
+        "build" => last_build(&project).ok_or("There's no built APK yet. Use Build APK first.")?,
+        _ => {
+            let path = original_apk(&project).ok_or("The original APK is missing from this project.")?;
+            let package = crate::axml::apk_package(&path)?;
+            RunApk { path: path.display().to_string(), package }
+        }
+    };
+    let launched = tauri::async_runtime::spawn_blocking(move || {
+        crate::device::run(&target, std::path::Path::new(&chosen.path), &chosen.package, replace, |message| {
+            let _ = app.emit("run-progress", ImportProgress { stage: "run".into(), message: message.into() });
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    state.runs.lock().unwrap().insert(id, launched.clone());
+    Ok(launched)
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunStatus {
+    launched: crate::device::Launched,
+    status: crate::device::GameStatus,
+}
+
+/// Whether the game started from this project is still running.
+#[tauri::command]
+pub async fn run_status(state: State<'_, AppState>, id: String) -> Result<Option<RunStatus>, String> {
+    let Some(launched) = state.runs.lock().unwrap().get(&id).cloned() else { return Ok(None) };
+    tauri::async_runtime::spawn_blocking(move || {
+        let status = crate::device::status(&launched.target, &launched.package)?;
+        Ok(Some(RunStatus { launched, status }))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn run_stop(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    let Some(launched) = state.runs.lock().unwrap().get(&id).cloned() else { return Ok(()) };
+    tauri::async_runtime::spawn_blocking(move || crate::device::stop(&launched.target, &launched.package))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 // ---------------------------------------------------------------------------

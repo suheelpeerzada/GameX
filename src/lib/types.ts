@@ -37,6 +37,44 @@ export interface ToolStatus {
   note: string;
 }
 
+// Running games (src-tauri/src/device.rs)
+
+export interface RunTarget {
+  /** "ld:<index>" or "adb:<serial>". */
+  id: string;
+  name: string;
+  kind: "ldplayer" | "device";
+  running: boolean;
+  adbEnabled: boolean | null;
+  detail: string;
+}
+
+export interface RunApk {
+  path: string;
+  package: string;
+}
+
+export interface RunOptions {
+  original: RunApk | null;
+  lastBuild: RunApk | null;
+}
+
+export interface Launched {
+  target: string;
+  package: string;
+}
+
+export interface GameStatus {
+  running: boolean;
+  pid: number | null;
+  crashLog: string | null;
+}
+
+export interface RunStatus {
+  launched: Launched;
+  status: GameStatus;
+}
+
 /** An optional tool (src-tauri/src/toolbox.rs). */
 export interface ToolInfo {
   id: string;

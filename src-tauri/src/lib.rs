@@ -1,4 +1,6 @@
 pub mod ai;
+pub mod axml;
+pub mod device;
 pub mod analyzer;
 mod commands;
 pub mod edits;
@@ -60,6 +62,12 @@ pub fn run() {
             commands::save_settings,
             commands::tool_status,
             commands::tools_catalog,
+            commands::run_targets,
+            commands::run_enable_adb,
+            commands::run_options,
+            commands::run_game,
+            commands::run_status,
+            commands::run_stop,
             commands::tool_install,
             commands::tool_uninstall,
             commands::tools_missing,

@@ -1,5 +1,6 @@
 import {
   FolderOutput,
+  Play,
   Gamepad2,
   Hammer,
   Moon,
@@ -17,6 +18,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import AiPanel from "../components/AiPanel";
 import BuildDialog from "../components/BuildDialog";
+import RunDialog from "../components/RunDialog";
 import CategoryTree from "../components/CategoryTree";
 import Inspector from "../components/Inspector";
 import { api, formatBytes, pickPath } from "../lib/api";
@@ -62,6 +64,10 @@ export default function ProjectScreen({ project, active: shown, focus, onToggleF
   const [edits, setEdits] = useState<EditState>({ edited: [], undo: null });
   const [revision, setRevision] = useState(0);
   const [building, setBuilding] = useState(false);
+  // The Run window stays mounted once opened, so it keeps watching the game.
+  const [runMounted, setRunMounted] = useState(false);
+  const [runOpen, setRunOpen] = useState(false);
+  const [gameRunning, setGameRunning] = useState(false);
   const [icon, setIcon] = useState<string | null>(null);
   const [theme, setThemeState] = useState<Theme>(currentTheme);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -277,6 +283,20 @@ export default function ProjectScreen({ project, active: shown, focus, onToggleF
           <button className="icon-button" onClick={toggleTheme} title={theme === "dark" ? "Light theme" : "Dark theme"}>
             {theme === "dark" ? <Sun size={18} /> : <Moon size={18} />}
           </button>
+          {project.container === "apk" && (
+            <button
+              className="build-button run-button"
+              onClick={() => {
+                setRunMounted(true);
+                setRunOpen(true);
+              }}
+              title="Run the game on an emulator or phone"
+            >
+              <Play size={16} />
+              Run
+              {gameRunning && <span className="status-dot ok" title="The game is running" />}
+            </button>
+          )}
           {project.container === "apk" ? (
             <button className="primary build-button" onClick={() => setBuilding(true)}>
               <Hammer size={16} />
@@ -296,6 +316,15 @@ export default function ProjectScreen({ project, active: shown, focus, onToggleF
       </header>
 
       {error && <div className="panel error project-error">{error}</div>}
+      {runMounted && (
+        <RunDialog
+          projectId={project.id}
+          open={runOpen}
+          onClose={() => setRunOpen(false)}
+          onRunning={setGameRunning}
+          onOpenSettings={onOpenSettings}
+        />
+      )}
       {building && (
         <BuildDialog projectId={project.id} editedCount={edits.edited.length} onClose={() => setBuilding(false)} />
       )}

@@ -649,6 +649,10 @@ pub fn build(
     fs::copy(&signed, &out).map_err(|e| format!("Couldn't save to {}: {e}", out.display()))?;
     let (sha256, size) = hash_file(&out).map_err(|e| e.to_string())?;
 
+    // Remember the build so it can be run on an emulator.
+    let last = serde_json::json!({ "path": out.display().to_string(), "package": options.package });
+    let _ = fs::write(build_dir.join("last.json"), last.to_string());
+
     // The work copy can be large; the saved APK is what matters.
     let _ = fs::remove_dir_all(&work);
     let _ = fs::remove_dir_all(&signed_dir);

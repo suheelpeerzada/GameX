@@ -7,6 +7,10 @@ import type {
   BuildInfo,
   ToolInfo,
   ToolProgress,
+  RunOptions,
+  RunStatus,
+  RunTarget,
+  Launched,
   BuildOptions,
   BuildResult,
   Category,
@@ -79,6 +83,15 @@ export const api = {
   saveSettings: (settings: Settings) => invoke<void>("save_settings", { settings }),
   toolStatus: () => invoke<ToolStatus[]>("tool_status"),
   toolsCatalog: () => invoke<ToolInfo[]>("tools_catalog"),
+  runTargets: () => invoke<RunTarget[]>("run_targets"),
+  runEnableAdb: (index: number) => invoke<void>("run_enable_adb", { index }),
+  runOptions: (id: string) => invoke<RunOptions>("run_options", { id }),
+  runGame: (id: string, target: string, apk: "original" | "build", replace: boolean) =>
+    invoke<Launched>("run_game", { id, target, apk, replace }),
+  runStatus: (id: string) => invoke<RunStatus | null>("run_status", { id }),
+  runStop: (id: string) => invoke<void>("run_stop", { id }),
+  onRunProgress: (handler: (p: ImportProgress) => void): Promise<UnlistenFn> =>
+    listen<ImportProgress>("run-progress", (e) => handler(e.payload)),
   toolInstall: (id: string) => invoke<ToolInfo>("tool_install", { id }),
   toolUninstall: (id: string) => invoke<void>("tool_uninstall", { id }),
   /** Which of these tools aren't available anywhere. */

@@ -107,7 +107,7 @@ pub fn status(tool: Tool, settings: &Settings) -> ToolStatus {
 
 /// apktool and jadx ship as `.bat` wrappers on Windows and shell scripts
 /// elsewhere, so check each PATHEXT extension as well as the bare name.
-fn find_on_path(name: &str) -> Option<PathBuf> {
+pub(crate) fn find_on_path(name: &str) -> Option<PathBuf> {
     let exts: Vec<String> = if cfg!(windows) {
         env::var("PATHEXT")
             .unwrap_or_else(|_| ".EXE;.BAT;.CMD".into())

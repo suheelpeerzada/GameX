@@ -1112,3 +1112,25 @@ pre.code { line-height: 1.5; }
 .tool-status { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
 .tool-expand { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 6px; color: var(--muted); }
 .tool-row:hover .tool-expand { color: var(--text); background: var(--border); }
+
+/* Run */
+.run-button { display: flex; align-items: center; gap: 7px; margin-left: 6px; padding: 8px 14px; border-radius: 8px; }
+.run-dialog h2 { display: flex; align-items: center; gap: 8px; }
+.run-status {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 12px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--raised);
+}
+.run-status > div:nth-child(2) { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.run-status .status-dot { margin-top: 6px; flex-shrink: 0; }
+.run-status.stopped { border-color: color-mix(in srgb, var(--bad) 50%, var(--border)); }
+.run-status-actions button { display: flex; align-items: center; gap: 6px; }
+.run-crash { max-height: 220px; font-size: 11px; }
+.radio { display: flex; align-items: center; gap: 8px; padding: 3px 0; }
+.run-note { display: flex; align-items: center; gap: 6px; margin-right: auto; }
+.field .row select { flex: 1; }

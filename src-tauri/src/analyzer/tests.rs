@@ -291,3 +291,86 @@ fn manual_categories_survive_reanalysis() {
         assert_eq!((blob.category, blob.auto_category), (Category::Items, Category::Unsorted));
     }
 }
+
+/// Milestone 6: roles, inheritance, gameplay values and grid maps, each only
+/// when there is evidence for it.
+#[test]
+fn classes_inherit_roles_and_report_gameplay_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = dir.path();
+    let java = |name: &str, body: &str| touch(r, &format!("jadx/sources/com/g/{name}.java"), body);
+    touch(r, "apktool/AndroidManifest.xml", MANIFEST);
+    java("Actor", "package com.g;\npublic class Actor {\n    float x;\n}\n");
+    java("Enemy", "package com.g;\npublic class Enemy extends Actor {\n}\n");
+    java(
+        "Bat",
+        "package com.g;\n\
+         public class Bat extends Enemy {\n\
+         \x20   public static final byte ENEMY_ID = 4;\n\
+         \x20   float flySpeed = 2.5f;\n\
+         \x20   int damage;\n\
+         \x20   public Bat() {\n\
+         \x20       this.damage = 3;\n\
+         \x20   }\n\
+         }\n",
+    );
+    java("SkullBat", "package com.g;\npublic class SkullBat extends Bat {\n}\n");
+    java("Item", "package com.g;\npublic class Item extends Actor {\n}\n");
+    java("Gramophone", "package com.g;\npublic class Gramophone extends Item {\n}\n");
+    // Extends only the generic Actor: nothing to inherit.
+    java("Lamp", "package com.g;\npublic class Lamp extends Actor {\n}\n");
+    java("Player", "package com.g;\npublic class Player extends Actor {\n    int lives = 3;\n}\n");
+    java("Grid", "package com.g;\npublic class Grid {\n    int[][] cells;\n}\n");
+    // Animation tables are 2D arrays too, but not a map.
+    java("Sprite", "package com.g;\npublic class Sprite {\n    static final int[][] WALK_ANIMS = {};\n    int resetTime;\n    public Sprite() {\n        this.resetTime = 0;\n    }\n}\n");
+    // RoomThing is Map by name, but enemies extend it too: a generic base.
+    java("RoomThing", "package com.g;\npublic class RoomThing {\n}\n");
+    java("Monster", "package com.g;\npublic class Monster extends RoomThing {\n}\n");
+    java("Crate", "package com.g;\npublic class Crate extends RoomThing {\n}\n");
+    // A superclass GameX doesn't have stays unresolved.
+    java("Widget", "package com.g;\npublic class Widget extends Unknown {\n}\n");
+    touch(r, "apktool/res/drawable/boss_idle1.png", "png");
+    touch(r, "apktool/res/drawable/boss_idle2.png", "png");
+
+    let p = analyze(&record(ContainerKind::Apk, &["apktool", "jadx"]), r);
+    assert_every_file_once(r, &p);
+    let class = |name: &str| object(&p, &format!("class:com.g.{name}"));
+    let role = |name: &str| class(name).role.as_deref();
+
+    assert_eq!((class("Enemy").category, role("Enemy")), (Category::Characters, Some("Enemy")));
+    assert_eq!((class("Bat").category, role("Bat")), (Category::Characters, Some("Enemy")));
+    assert!(class("Bat").reason.contains("extends Enemy"), "{}", class("Bat").reason);
+    assert_eq!((class("SkullBat").category, role("SkullBat")), (Category::Characters, Some("Enemy")));
+    assert!(class("SkullBat").reason.contains("Bat → Enemy"), "{}", class("SkullBat").reason);
+    assert_eq!(class("Gramophone").category, Category::Items);
+    assert_eq!(class("Lamp").category, Category::Code);
+    assert_eq!((class("Actor").category, role("Actor")), (Category::Characters, None));
+    assert_eq!(role("Player"), Some("Player"));
+    assert_eq!(class("Grid").category, Category::Map);
+    assert_eq!(class("Sprite").category, Category::Code);
+    assert!(class("Sprite").properties.iter().any(|p| p.label == "Animation fields" && p.value == "WALK_ANIMS"));
+    // A constructor reset to 0 isn't reported; nor is an ID constant (ENEMY_ID).
+    assert!(class("Sprite").gameplay.is_empty());
+    assert_eq!(class("Widget").category, Category::Code);
+    assert_eq!(class("RoomThing").category, Category::Map);
+    assert_eq!(role("Monster"), Some("Enemy"));
+    assert_eq!(class("Crate").category, Category::Code);
+
+    // Gameplay values: named for gameplay, literal, with file and line.
+    let bat: Vec<_> = class("Bat")
+        .gameplay
+        .iter()
+        .map(|g| (g.name.as_str(), g.value.as_str(), g.line, g.set_in.as_str()))
+        .collect();
+    assert_eq!(bat, [("flySpeed", "2.5", 4, "field"), ("damage", "3", 7, "constructor")]);
+    assert_eq!(class("Bat").gameplay[0].file, "jadx/sources/com/g/Bat.java");
+    assert_eq!(class("Player").gameplay[0].name, "lives");
+    assert!(class("Enemy").gameplay.is_empty());
+
+    // Roles reach images too.
+    let boss = object(&p, "set:res:drawable/boss_idle");
+    assert_eq!((boss.category, boss.role.as_deref()), (Category::Characters, Some("Enemy")));
+
+    let characters = p.capabilities.iter().find(|c| c.feature == "characters").unwrap();
+    assert!(characters.note.contains("enemy"), "{}", characters.note);
+}

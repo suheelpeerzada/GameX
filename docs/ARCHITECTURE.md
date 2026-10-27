@@ -86,10 +86,27 @@ names. It has two layers:
    - Structural patterns: numbered images (`walk1`, `walk2`) become one
      image set; a sprite drawn facing three or more directions
      (`_u`, `_d`, `_left`...) is treated as a character.
+   - Characters get a role (Player, Enemy, NPC, Ally) from general
+     vocabulary, when their name gives one.
    - Anything with no signal goes to Unsorted.
 2. **Engine integrations** first claim the files they know for certain
    (a Godot `.pck`, Unity `levelN` files, Android resources and code
    classes) and leave every other file to the generic classifier.
+
+For code classes (Native Android), classes are analyzed together in two
+passes. First each class is placed on its own evidence: name, fields,
+supertype, the launcher activity, and 2D grid fields named like level data
+(`int[][] tiles`). Then a class with no signal of its own inherits the
+category and role of its nearest ancestor with strong evidence (`bat
+extends enemy` makes `bat` an enemy). Only ancestors with a specific role,
+or in Items or Map, pass anything on. A base whose own subclasses are
+clearly other kinds of objects (a `roomObject` that enemies and items
+extend) is treated as generic and passes nothing on.
+
+Gameplay values are literal numbers in fields named for gameplay (speed,
+health, damage, time, jump...), read from field initializers and
+constructors, each with its file and line. Identifier-like names (state,
+type, id, dir...) and constructor resets to 0 are left out.
 
 Every object records a confidence and a plain-language reason. Every file in
 `unpacked/` belongs to exactly one object; tests check this for each kind of

@@ -29,6 +29,8 @@ export default function Inspector(props: Props) {
   const { projectId, object, edited, revision, related, onOpen, onMove, onEdited, onContext } = props;
   // The parent keeps one Inspector per tab, so this state lasts per tab.
   const [file, setFile] = useState(object.sourceFiles[0] ?? null);
+  // A line to scroll to in the preview (from a gameplay value).
+  const [focusLine, setFocusLine] = useState<number | null>(null);
   const [section, setSection] = useState<Section>("details");
   const [editing, setEditing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -57,8 +59,9 @@ export default function Inspector(props: Props) {
     }
   };
 
-  /** Shows a file in the Code tab. */
-  const choose = (f: string, edit = false) => {
+  /** Shows a file in the Code tab, optionally at a line. */
+  const choose = (f: string, edit = false, line: number | null = null) => {
+    setFocusLine(line);
     setFile(f);
     setEditing(edit);
     setError(null);
@@ -98,7 +101,7 @@ export default function Inspector(props: Props) {
           edited={edited}
           related={related}
           onMove={onMove}
-          onPick={(f) => choose(f)}
+          onPick={(f, line) => choose(f, false, line ?? null)}
           onOpen={onOpen}
         />
       )}
@@ -169,7 +172,7 @@ export default function Inspector(props: Props) {
               />
             ) : (
               <div ref={previewRef} onMouseUp={captureSelection} onKeyUp={captureSelection}>
-                <FilePreview key={`${file}:${revision}`} projectId={projectId} path={file} />
+                <FilePreview key={`${file}:${revision}`} projectId={projectId} path={file} focusLine={focusLine} />
               </div>
             ))}
         </>
@@ -280,7 +283,7 @@ function DetailsSection(props: {
   edited: Set<string>;
   related: GameObject[];
   onMove: (category: Category | null) => void;
-  onPick: (f: string) => void;
+  onPick: (f: string, line?: number) => void;
   onOpen: (id: string) => void;
 }) {
   const { object, edited, related, onMove, onPick, onOpen } = props;
@@ -297,6 +300,14 @@ function DetailsSection(props: {
           <dd>{object.displayName}</dd>
           <dt>Kind</dt>
           <dd>{object.kind}</dd>
+          {object.role && (
+            <>
+              <dt>Role</dt>
+              <dd>
+                <span className="role-badge">{object.role}</span>
+              </dd>
+            </>
+          )}
           <dt>Category</dt>
           <dd>
             <select
@@ -355,6 +366,28 @@ function DetailsSection(props: {
           </ul>
         </div>
       </div>
+
+      {object.gameplay.length > 0 && (
+        <div className="card gameplay">
+          <h4>Gameplay values</h4>
+          <p className="muted small">
+            Numbers this code sets, found where they're written. Click one to see it in the file.
+          </p>
+          <ul>
+            {object.gameplay.map((g) => (
+              <li key={`${g.name}:${g.line}`}>
+                <button onClick={() => onPick(g.file, g.line)} title={`${g.file}, line ${g.line}`}>
+                  <span className="gameplay-name">{g.name}</span>
+                  <span className="gameplay-value mono">{g.value}</span>
+                  <span className="muted small">
+                    {g.setIn === "constructor" ? "set when created" : "initial value"} · line {g.line}
+                  </span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       {related.length > 0 && (
         <div className="card related">
@@ -583,9 +616,18 @@ function TextEditor(props: {
   );
 }
 
-function FilePreview({ projectId, path }: { projectId: string; path: string }) {
+function FilePreview({ projectId, path, focusLine }: { projectId: string; path: string; focusLine?: number | null }) {
   const [preview, setPreview] = useState<Preview | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const preRef = useRef<HTMLPreElement>(null);
+
+  // Scroll a text preview so the given line is near the top.
+  useEffect(() => {
+    const pre = preRef.current;
+    if (!pre || !focusLine || preview?.type !== "text") return;
+    const lineHeight = parseFloat(getComputedStyle(pre).lineHeight) || 16;
+    pre.scrollTop = Math.max(0, (focusLine - 3) * lineHeight);
+  }, [preview, focusLine]);
 
   useEffect(() => {
     let current = true;
@@ -619,7 +661,9 @@ function FilePreview({ projectId, path }: { projectId: string; path: string }) {
     case "text":
       return (
         <div className="preview">
-          <pre className="code">{preview.text}</pre>
+          <pre ref={preRef} className="code">
+            {preview.text}
+          </pre>
           {preview.truncated && (
             <div className="muted small">Showing the start of a {formatBytes(preview.size)} file.</div>
           )}

@@ -12,6 +12,7 @@ use crate::model::{Category, GameObject, Property};
 
 use super::tree::{FileEntry, FileTree};
 
+#[derive(Clone)]
 pub struct Placement {
     pub category: Category,
     pub kind: String,
@@ -341,6 +342,8 @@ impl<'a> Builder<'a> {
         (0..self.claimed.len()).filter(|&i| !self.claimed[i]).collect()
     }
 
+    /// Adds an object for these files and returns it, so callers can fill
+    /// in a role or gameplay values.
     pub fn add(
         &mut self,
         id: String,
@@ -348,7 +351,7 @@ impl<'a> Builder<'a> {
         placement: Placement,
         files: &[usize],
         properties: Vec<Property>,
-    ) {
+    ) -> &mut GameObject {
         let mut source_files = Vec::new();
         for &i in files {
             self.claimed[i] = true;
@@ -366,7 +369,10 @@ impl<'a> Builder<'a> {
             properties,
             confidence: placement.confidence,
             reason: placement.reason,
+            role: None,
+            gameplay: Vec::new(),
         });
+        self.objects.last_mut().expect("just pushed")
     }
 
     /// Adds one object per file that is still unplaced, groups numbered
@@ -386,6 +392,11 @@ impl<'a> Builder<'a> {
         }
         let mut objects = group_numbered_images(self.objects);
         mark_directional_sprites(&mut objects);
+        for obj in &mut objects {
+            if obj.auto_category == Category::Characters && obj.role.is_none() {
+                obj.role = role_from_name(&obj.display_name).map(|(role, _)| role.to_string());
+            }
+        }
         let mut seen = HashSet::new();
         for obj in &mut objects {
             if !seen.insert(obj.id.clone()) {
@@ -481,6 +492,39 @@ fn group_numbered_images(objects: Vec<GameObject>) -> Vec<GameObject> {
         .filter_map(|(obj, merged)| merged.is_none().then_some(obj))
         .chain(sets)
         .collect()
+}
+
+/// Character roles, from general game vocabulary.
+const ROLE_WORDS: &[(&str, &[&str])] = &[
+    ("Player", &["player", "hero", "heroine", "protagonist", "avatar"]),
+    (
+        "Enemy",
+        &[
+            "enemy", "enemies", "monster", "boss", "mob", "foe", "villain", "zombie", "ghost", "vampire",
+            "skeleton", "goblin", "orc", "demon", "slime", "mummy", "minion",
+        ],
+    ),
+    ("NPC", &["npc", "villager", "merchant", "shopkeeper", "vendor", "trader", "citizen", "townsfolk"]),
+    ("Ally", &["ally", "allies", "companion", "pet", "partner", "sidekick"]),
+];
+
+/// The role a character's name points to, and the word that showed it.
+/// Later words win, like elsewhere: "player_enemy_marker" is an enemy thing.
+pub fn role_from_name(name: &str) -> Option<(&'static str, &'static str)> {
+    let stem = name.rsplit_once('.').map_or(name, |(s, _)| s);
+    let mut prefix = None;
+    for token in tokens(stem).iter().rev() {
+        for &(role, words) in ROLE_WORDS {
+            for &word in words {
+                match word_matches(token, word) {
+                    Some(true) => return Some((role, word)),
+                    Some(false) if prefix.is_none() => prefix = Some((role, word)),
+                    _ => {}
+                }
+            }
+        }
+    }
+    prefix
 }
 
 /// Name endings for the direction a sprite faces.
@@ -596,6 +640,15 @@ mod tests {
         assert_eq!(cat("knave_r.png"), Category::Characters);
         assert_eq!(cat("lamp_u.png"), Category::Assets);
         assert_eq!(cat("sign_left.png"), Category::Assets);
+    }
+
+    #[test]
+    fn character_roles_come_from_names() {
+        assert_eq!(role_from_name("PlayerSprite"), Some(("Player", "player")));
+        assert_eq!(role_from_name("boss_idle.png"), Some(("Enemy", "boss")));
+        assert_eq!(role_from_name("ShopkeeperNpc"), Some(("NPC", "npc")));
+        assert_eq!(role_from_name("petDog"), Some(("Ally", "pet")));
+        assert_eq!(role_from_name("actor"), None);
     }
 
     #[test]

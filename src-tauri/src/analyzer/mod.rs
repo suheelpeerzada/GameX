@@ -27,7 +27,7 @@ use crate::workspace::Workspace;
 use tree::FileTree;
 
 /// Bump when analysis output changes, so cached results are redone.
-pub const ANALYZER_VERSION: u32 = 2;
+pub const ANALYZER_VERSION: u32 = 3;
 
 pub struct Detection {
     /// 0.0 = definitely not this engine, 1.0 = certain.
@@ -178,6 +178,18 @@ pub(crate) fn characters_capability(objects: &[GameObject]) -> Capability {
         .filter(|o| o.auto_category == Category::Characters)
         .map(|o| o.display_name.as_str())
         .collect();
+    let mut roles: BTreeMap<&str, usize> = BTreeMap::new();
+    for o in objects.iter().filter(|o| o.auto_category == Category::Characters) {
+        if let Some(role) = &o.role {
+            *roles.entry(role.as_str()).or_default() += 1;
+        }
+    }
+    let role_note = if roles.is_empty() {
+        String::new()
+    } else {
+        let parts: Vec<String> = roles.iter().map(|(r, n)| format!("{n} {}", r.to_lowercase())).collect();
+        format!(" By role: {}.", parts.join(", "))
+    };
     if found.is_empty() {
         cap(
             "characters",
@@ -191,7 +203,7 @@ pub(crate) fn characters_capability(objects: &[GameObject]) -> Capability {
             "Characters",
             CapabilityStatus::Partial,
             format!(
-                "Found {} likely characters from names and fields ({}). Check them and move any that are wrong.",
+                "Found {} likely characters from names, fields and inheritance ({}).{role_note} Check them and move any that are wrong.",
                 found.len(),
                 list_names(&found, 4)
             ),

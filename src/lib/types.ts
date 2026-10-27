@@ -71,6 +71,19 @@ export interface GameObject {
   properties: Property[];
   confidence: number;
   reason: string;
+  /** For characters: "Player", "Enemy", "NPC" or "Ally", when there is evidence. */
+  role: string | null;
+  /** Gameplay numbers found in the code, each with where it is set. */
+  gameplay: GameplayValue[];
+}
+
+export interface GameplayValue {
+  name: string;
+  value: string;
+  /** Path relative to unpacked/. */
+  file: string;
+  line: number;
+  setIn: "field" | "constructor";
 }
 
 export interface EngineInfo {

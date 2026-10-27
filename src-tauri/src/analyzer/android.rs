@@ -4,9 +4,11 @@
 
 use std::collections::BTreeMap;
 
-use crate::model::{Capability, CapabilityStatus, Category, ContainerKind, GameObject};
+use crate::model::{Capability, CapabilityStatus, Category, ContainerKind, GameObject, GameplayValue};
 
-use super::classify::{self, file_props, is_image, match_words, prop, tokens, Builder, Placement, MEDIA_WORDS};
+use super::classify::{
+    self, file_props, is_image, match_words, prop, role_from_name, tokens, Builder, Placement, MEDIA_WORDS,
+};
 use super::java::{self, ClassInfo};
 use super::tree::FileTree;
 use super::{
@@ -377,6 +379,112 @@ const MOVEMENT_WORDS: &[&str] = &[
     "acceleration", "vx", "vy", "dx", "dy", "walk", "friction", "knockback",
 ];
 
+/// Field-name words for numbers that change how the game plays. A value is
+/// only reported when its field name contains one of these.
+const GAMEPLAY_WORDS: &[&str] = &[
+    "speed", "velocity", "vel", "jump", "gravity", "health", "hp", "life", "lives", "damage", "attack",
+    "power", "strength", "defense", "defence", "armor", "armour", "ammo", "bullets", "cooldown", "delay",
+    "timer", "time", "duration", "range", "radius", "distance", "score", "points", "coins", "gold", "money",
+    "accel", "acceleration", "friction", "mass", "weight", "energy", "mana", "stamina", "spawn", "rate",
+    "chance", "probability", "lifetime", "reload", "knockback",
+];
+
+/// Names that mark identifiers rather than tuning: `STATE_ATTACK`, `ENEMY_ID`.
+const NOT_GAMEPLAY_WORDS: &[&str] = &[
+    "state", "type", "id", "dir", "mode", "index", "idx", "event", "key", "action", "sfx", "sound", "color",
+    "colour", "flag",
+];
+
+/// Field names for 2D arrays that hold a level layout.
+const GRID_MAP_WORDS: &[&str] = &[
+    "map", "level", "tile", "tiles", "grid", "cells", "cell", "board", "layout", "room", "terrain", "world",
+    "maze", "blocks",
+];
+
+/// Field names for animation data (frame lists, animation tables).
+const ANIMATION_WORDS: &[&str] = &["anim", "anims", "animation", "animations", "frames"];
+
+fn gameplay_values(info: &ClassInfo, java_path: &str) -> Vec<GameplayValue> {
+    let mut seen = std::collections::HashSet::new();
+    info.values
+        .iter()
+        .filter(|v| {
+            let words = tokens(&v.field);
+            words.iter().any(|t| GAMEPLAY_WORDS.contains(&t.as_str()))
+                && !words.iter().any(|t| NOT_GAMEPLAY_WORDS.contains(&t.as_str()))
+        })
+        // A constructor resetting a field to 0 or false isn't a tuning value.
+        .filter(|v| !(v.in_constructor && matches!(v.value.as_str(), "0" | "0.0" | "false")))
+        .filter(|v| seen.insert((v.field.clone(), v.value.clone())))
+        .map(|v| GameplayValue {
+            name: v.field.clone(),
+            value: v.value.clone(),
+            file: java_path.to_string(),
+            line: v.line,
+            set_in: if v.in_constructor { "constructor" } else { "field" }.to_string(),
+        })
+        .collect()
+}
+
+/// One code class while the classes are being analyzed together.
+struct ClassEntry {
+    fqcn: String,
+    info: ClassInfo,
+    java_file: Option<usize>,
+    files: Vec<usize>,
+    library: bool,
+    placement: Placement,
+    role: Option<String>,
+}
+
+impl ClassEntry {
+    /// Evidence strong enough to pass on to subclasses: a character with a
+    /// known role, an item or part of the map. A generic base such as
+    /// "actor" passes nothing on, since many kinds of objects extend it.
+    fn passes_on(&self) -> bool {
+        self.placement.confidence >= 0.5
+            && match self.placement.category {
+                Category::Characters => self.role.is_some(),
+                Category::Items | Category::Map => true,
+                _ => false,
+            }
+    }
+
+    /// Placed in Characters, Items or Map by its own evidence.
+    fn game_category(&self) -> Option<Category> {
+        (self.placement.confidence >= 0.5
+            && matches!(self.placement.category, Category::Characters | Category::Items | Category::Map))
+        .then_some(self.placement.category)
+    }
+
+    /// No real signal of its own: generic code, or a guess below 0.5.
+    fn is_weak(&self) -> bool {
+        !self.library
+            && (self.placement.confidence < 0.5
+                || (self.placement.category == Category::Code && self.placement.kind == "class"))
+    }
+}
+
+/// The class a class extends, if it's one of the game's own classes.
+fn parent_index(entries: &[ClassEntry], index: &BTreeMap<String, usize>, i: usize) -> Option<usize> {
+    let parent = entries[i].info.extends.as_deref()?;
+    if parent.contains('.') {
+        return index.get(parent).copied();
+    }
+    // jadx writes same-package superclasses without their package.
+    let package = entries[i].fqcn.rsplit_once('.').map_or("", |(p, _)| p);
+    index
+        .get(&format!("{package}.{parent}"))
+        .copied()
+        .or_else(|| {
+            let mut matches = entries.iter().enumerate().filter(|(_, e)| java::simple_name(&e.fqcn) == parent);
+            match (matches.next(), matches.next()) {
+                (Some((j, _)), None) => Some(j),
+                _ => None,
+            }
+        })
+}
+
 fn claim_classes(b: &mut Builder, manifest: &Manifest) {
     let tree = b.tree;
     // fqcn -> (java file, smali files)
@@ -393,6 +501,8 @@ fn claim_classes(b: &mut Builder, manifest: &Manifest) {
             classes.entry(outer).or_default().1.push(i);
         }
     }
+    // Pass 1: each class on its own evidence.
+    let mut entries: Vec<ClassEntry> = Vec::new();
     for (fqcn, (java_file, mut smali_files)) in classes {
         smali_files.sort_by_key(|&i| tree.files[i].logical.contains('$'));
         let info = match java_file {
@@ -400,9 +510,87 @@ fn claim_classes(b: &mut Builder, manifest: &Manifest) {
             None => tree.read_text(&tree.files[smali_files[0]], 1 << 20).map(|t| java::parse_smali(&t)),
         }
         .unwrap_or_default();
-
         let library = is_library(&fqcn);
         let placement = classify_class(&fqcn, &info, manifest, library);
+        let role = (placement.category == Category::Characters)
+            .then(|| role_from_name(java::simple_name(&fqcn)).map(|(r, _)| r.to_string()))
+            .flatten();
+        entries.push(ClassEntry {
+            fqcn,
+            info,
+            java_file,
+            files: java_file.into_iter().chain(smali_files).collect(),
+            library,
+            placement,
+            role,
+        });
+    }
+
+    // Pass 2: a class with no signal of its own takes the category and role
+    // of the nearest ancestor that has strong evidence (bat extends enemy).
+    let index: BTreeMap<String, usize> = entries.iter().enumerate().map(|(i, e)| (e.fqcn.clone(), i)).collect();
+    let parents: Vec<Option<usize>> = (0..entries.len()).map(|i| parent_index(&entries, &index, i)).collect();
+    // A base whose own subclasses are clearly other kinds of objects (a
+    // "roomObject" that enemies and items extend) is generic: it passes
+    // nothing on, whatever its name says.
+    let mut generic_base = vec![false; entries.len()];
+    for i in 0..entries.len() {
+        let Some(category) = entries[i].game_category() else { continue };
+        let mut current = parents[i];
+        for _ in 0..12 {
+            let Some(ancestor) = current.filter(|&a| a != i) else { break };
+            if entries[ancestor].game_category().is_some_and(|c| c != category) {
+                generic_base[ancestor] = true;
+            }
+            current = parents[ancestor];
+        }
+    }
+    let mut inherited: Vec<(usize, Placement, Option<String>)> = Vec::new();
+    for i in 0..entries.len() {
+        let own_role_missing = entries[i].placement.category == Category::Characters && entries[i].role.is_none();
+        if !entries[i].is_weak() && !own_role_missing {
+            continue;
+        }
+        let mut path = vec![java::simple_name(&entries[i].fqcn).to_string()];
+        let mut current = i;
+        for _ in 0..12 {
+            let Some(parent) = parents[current] else { break };
+            if parent == i {
+                break; // a cycle; shouldn't happen in real code
+            }
+            path.push(java::simple_name(&entries[parent].fqcn).to_string());
+            let ancestor = &entries[parent];
+            if ancestor.passes_on() && !generic_base[parent] {
+                let chain = path[1..].join(" → ");
+                if own_role_missing {
+                    // Already a character by its own name; only the role is new.
+                    inherited.push((i, entries[i].placement.clone(), ancestor.role.clone()));
+                } else {
+                    let what = match (ancestor.placement.category, ancestor.role.as_deref()) {
+                        (Category::Characters, Some(role)) => format!("a character ({})", role.to_lowercase()),
+                        (Category::Items, _) => "an item".to_string(),
+                        _ => "part of the map".to_string(),
+                    };
+                    let placement = Placement::new(
+                        ancestor.placement.category,
+                        "class",
+                        0.55,
+                        format!("it extends {chain}, which is {what}"),
+                    );
+                    inherited.push((i, placement, ancestor.role.clone()));
+                }
+                break;
+            }
+            current = parent;
+        }
+    }
+    for (i, placement, role) in inherited {
+        entries[i].placement = placement;
+        entries[i].role = role;
+    }
+
+    for entry in entries {
+        let ClassEntry { fqcn, info, java_file, files, library, placement, role } = entry;
         let mut props = vec![];
         if let Some((package, _)) = fqcn.rsplit_once('.') {
             props.push(prop("Package", package));
@@ -417,6 +605,16 @@ fn claim_classes(b: &mut Builder, manifest: &Manifest) {
             props.push(prop("Implements", info.implements.join(", ")));
         }
         props.push(prop("Fields", info.fields.len().to_string()));
+        let animation_fields: Vec<&str> = info
+            .fields
+            .iter()
+            .filter(|f| tokens(f).iter().any(|t| ANIMATION_WORDS.contains(&t.as_str())))
+            .map(String::as_str)
+            .take(6)
+            .collect();
+        if !animation_fields.is_empty() {
+            props.push(prop("Animation fields", animation_fields.join(", ")));
+        }
         props.push(prop("Methods", info.methods.len().to_string()));
         if !library {
             let hints = movement_hints(&info);
@@ -424,14 +622,19 @@ fn claim_classes(b: &mut Builder, manifest: &Manifest) {
                 props.push(prop("Movement hints", hints.join(", ")));
             }
         }
-        let files: Vec<usize> = java_file.into_iter().chain(smali_files).collect();
-        b.add(
+        let gameplay = match (library, java_file) {
+            (false, Some(j)) => gameplay_values(&info, &tree.files[j].path),
+            _ => Vec::new(),
+        };
+        let object = b.add(
             format!("class:{fqcn}"),
             java::simple_name(&fqcn).to_string(),
             placement,
             &files,
             props,
         );
+        object.role = role;
+        object.gameplay = gameplay;
     }
 }
 
@@ -499,6 +702,18 @@ fn classify_class(fqcn: &str, info: &ClassInfo, manifest: &Manifest, library: bo
     }
     if member_has(&info.fields, HEALTH_WORDS) && member_has(&info.fields, POSITION_WORDS) {
         return Placement::new(Category::Characters, "class", 0.55, "it has both health and position fields");
+    }
+    let map_grid = info
+        .grid_fields
+        .iter()
+        .find(|f| tokens(f).iter().any(|t| GRID_MAP_WORDS.contains(&t.as_str())));
+    if let Some(grid) = map_grid {
+        return Placement::new(
+            Category::Map,
+            "class",
+            0.5,
+            format!("it holds a 2D grid field ({grid}), the usual way a level layout is stored"),
+        );
     }
     let base = info.extends.as_deref().map(java::simple_name);
     if let Some(base) = base.filter(|b| CORE_BASES.contains(b)) {

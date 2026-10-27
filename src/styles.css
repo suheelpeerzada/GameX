@@ -956,3 +956,32 @@ input[type="text"], input[type="password"], input[type="number"], select, textar
 }
 .recent-meta { display: block; margin-top: 4px; font-size: 11.5px; color: var(--muted); }
 .trimmed-note { display: block; color: var(--warn); }
+
+/* Milestone 6: roles, gameplay values, uncertainty */
+.role-badge {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 2px 9px;
+  border-radius: 6px;
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.tag.unsure-tag { background: color-mix(in srgb, var(--warn) 16%, transparent); color: var(--warn); }
+.gameplay { margin-top: 16px; padding: 12px 14px; }
+.gameplay ul { list-style: none; margin: 8px 0 0; padding: 0; }
+.gameplay li button {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 2px 12px;
+  width: 100%;
+  padding: 7px 6px;
+  border: none;
+  border-top: 1px solid var(--border);
+  border-radius: 0;
+  background: transparent;
+  text-align: left;
+}
+.gameplay li button:hover { background: var(--raised); }
+.gameplay-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
+.gameplay-value { grid-row: span 2; align-self: center; font-size: 14px; color: var(--accent); }
+pre.code { line-height: 1.5; }

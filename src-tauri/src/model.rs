@@ -102,6 +102,28 @@ pub struct GameObject {
     pub confidence: f32,
     /// Why the analyzer chose `auto_category`.
     pub reason: String,
+    /// For characters: "Player", "Enemy", "NPC" or "Ally", when there is
+    /// evidence for one.
+    #[serde(default)]
+    pub role: Option<String>,
+    /// Gameplay numbers found in the code, each with where it is set.
+    #[serde(default)]
+    pub gameplay: Vec<GameplayValue>,
+}
+
+/// A literal gameplay value (speed, health, timers...) found in code.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GameplayValue {
+    /// The field, e.g. "jumpSpeed".
+    pub name: String,
+    pub value: String,
+    /// Path relative to `unpacked/` of the file that sets it.
+    pub file: String,
+    /// 1-based line in that file.
+    pub line: usize,
+    /// "field" (its initial value) or "constructor" (set when created).
+    pub set_in: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

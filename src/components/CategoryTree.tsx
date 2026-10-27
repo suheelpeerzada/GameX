@@ -6,6 +6,22 @@ import { CategoryIcon, ObjectIcon } from "../lib/visuals";
 
 const PAGE = 200;
 
+const ROLE_GROUPS: Record<string, string> = {
+  Player: "players",
+  Enemy: "enemies",
+  NPC: "NPCs",
+  Ally: "allies",
+};
+
+function roleGroup(obj: GameObject): string {
+  return obj.role ? (ROLE_GROUPS[obj.role] ?? obj.role) : "other characters";
+}
+
+/** A placement in a game category made on weak evidence. */
+function isUnsure(obj: GameObject): boolean {
+  return obj.confidence < 0.5 && obj.category !== "code" && obj.category !== "unsorted";
+}
+
 interface Props {
   objects: GameObject[];
   /** Files the user has changed; objects containing one are marked. */
@@ -29,9 +45,11 @@ export default function CategoryTree({ objects, edited, selectedId, onSelect, se
       if (query && !obj.displayName.toLowerCase().includes(query) && !obj.kind.includes(query)) continue;
       let kinds = byCategory.get(obj.category);
       if (!kinds) byCategory.set(obj.category, (kinds = new Map()));
-      const list = kinds.get(obj.kind) ?? [];
+      // Characters are grouped by role (Player, Enemy...), others by kind.
+      const group = obj.category === "characters" ? roleGroup(obj) : obj.kind;
+      const list = kinds.get(group) ?? [];
       list.push(obj);
-      kinds.set(obj.kind, list);
+      kinds.set(group, list);
     }
     for (const kinds of byCategory.values()) {
       for (const list of kinds.values()) {
@@ -69,6 +87,11 @@ export default function CategoryTree({ objects, edited, selectedId, onSelect, se
               <span className="tree-name">{obj.displayName}</span>
               {obj.sourceFiles.some((f) => edited.has(f)) && <span className="tag">edited</span>}
               {obj.category !== obj.autoCategory && <span className="tag">moved</span>}
+              {obj.category === obj.autoCategory && isUnsure(obj) && (
+                <span className="tag unsure-tag" title={`Only ${Math.round(obj.confidence * 100)}% sure: ${obj.reason}`}>
+                  unsure
+                </span>
+              )}
             </button>
           </li>
         ))}

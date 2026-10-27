@@ -1,7 +1,19 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { open } from "@tauri-apps/plugin-dialog";
-import type { ImportProgress, ImportRecord, Settings, ToolStatus } from "./types";
+import { open, save } from "@tauri-apps/plugin-dialog";
+import type {
+  BuildInfo,
+  BuildOptions,
+  BuildResult,
+  Category,
+  EditState,
+  GameProject,
+  ImportProgress,
+  ImportRecord,
+  Preview,
+  Settings,
+  ToolStatus,
+} from "./types";
 
 /** False when the UI is opened in a plain browser (e.g. `npm run dev`). */
 export const inDesktopApp = isTauri();
@@ -10,6 +22,26 @@ export const api = {
   importGame: (path: string) => invoke<ImportRecord>("import_game", { path }),
   listProjects: () => invoke<ImportRecord[]>("list_projects"),
   getProject: (id: string) => invoke<ImportRecord>("get_project", { id }),
+  deleteProject: (id: string) => invoke<void>("delete_project", { id }),
+  getAnalysis: (id: string, refresh = false) =>
+    invoke<GameProject>("get_analysis", { id, refresh }),
+  /** `null` restores the analyzer's choice. */
+  setCategory: (id: string, objectId: string, category: Category | null) =>
+    invoke<void>("set_category", { id, objectId, category }),
+  readPreview: (id: string, path: string) => invoke<Preview>("read_preview", { id, path }),
+  readTextFile: (id: string, path: string) => invoke<string>("read_text_file", { id, path }),
+  getEditState: (id: string) => invoke<EditState>("get_edit_state", { id }),
+  saveTextFile: (id: string, path: string, text: string) =>
+    invoke<EditState>("save_text_file", { id, path, text }),
+  replaceFile: (id: string, path: string, source: string) =>
+    invoke<EditState>("replace_file", { id, path, source }),
+  revertFile: (id: string, path: string) => invoke<EditState>("revert_file", { id, path }),
+  undoEdit: (id: string) => invoke<EditState>("undo_edit", { id }),
+  getBuildInfo: (id: string) => invoke<BuildInfo>("get_build_info", { id }),
+  buildApk: (id: string, options: BuildOptions) => invoke<BuildResult>("build_apk", { id, options }),
+  readPng: (path: string) => invoke<string>("read_png", { path }),
+  onBuildProgress: (handler: (p: ImportProgress) => void): Promise<UnlistenFn> =>
+    listen<ImportProgress>("build-progress", (e) => handler(e.payload)),
   getSettings: () => invoke<Settings>("get_settings"),
   saveSettings: (settings: Settings) => invoke<void>("save_settings", { settings }),
   toolStatus: () => invoke<ToolStatus[]>("tool_status"),
@@ -30,6 +62,33 @@ export async function pickPath(kind: PickKind): Promise<string | null> {
   const result = await open({ multiple: false, directory: kind === "folder", filters });
   return typeof result === "string" ? result : null;
 }
+
+/** Opens a file picker limited to the given extensions. */
+export async function pickFile(label: string, extensions: string[]): Promise<string | null> {
+  const result = await open({ multiple: false, filters: [{ name: label, extensions }] });
+  return typeof result === "string" ? result : null;
+}
+
+/** Asks where to save a new APK. */
+export async function pickSaveApk(defaultName: string): Promise<string | null> {
+  return save({ defaultPath: defaultName, filters: [{ name: "Android package", extensions: ["apk"] }] });
+}
+
+/** True for paths GameX can edit: apktool output (rebuilt) or plain imported files. */
+export function isEditablePath(path: string): boolean {
+  return path.startsWith("apktool/") || path.startsWith("files/");
+}
+
+export function extensionOf(path: string): string {
+  const name = path.split("/").pop() ?? path;
+  const dot = name.lastIndexOf(".");
+  return dot > 0 ? name.slice(dot + 1).toLowerCase() : "";
+}
+
+/** Formats replaced with a picked file rather than edited as text. */
+export const mediaExtensions = new Set([
+  "png", "jpg", "jpeg", "webp", "gif", "bmp", "ogg", "mp3", "wav", "m4a", "aac", "flac", "ttf", "otf", "mp4",
+]);
 
 export function formatBytes(bytes: number): string {
   const units = ["B", "KB", "MB", "GB"];

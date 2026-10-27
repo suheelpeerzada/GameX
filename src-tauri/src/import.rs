@@ -299,7 +299,7 @@ fn copy_hashed(from: &Path, to: &Path) -> io::Result<(String, u64)> {
 
 /// Copies a folder tree and returns the bytes copied. Symlinks are skipped so
 /// an import can never pull in files from outside the chosen folder.
-fn copy_dir(from: &Path, to: &Path) -> io::Result<u64> {
+pub(crate) fn copy_dir(from: &Path, to: &Path) -> io::Result<u64> {
     let mut total = 0;
     for entry in WalkDir::new(from).follow_links(false) {
         let entry = entry.map_err(io::Error::other)?;
@@ -440,6 +440,7 @@ mod tests {
         Settings {
             apktool_path: Some("/nonexistent/apktool".into()),
             jadx_path: Some("/nonexistent/jadx".into()),
+            signer_path: None,
         }
     }
 

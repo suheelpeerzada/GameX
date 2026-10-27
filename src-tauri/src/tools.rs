@@ -1,4 +1,5 @@
-//! External decompilers. They run as child processes; GameX never links them.
+//! External tools (decompilers, apktool, the APK signer). They run as child
+//! processes; GameX never links them.
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -12,6 +13,8 @@ use crate::settings::Settings;
 pub enum Tool {
     Apktool,
     Jadx,
+    /// uber-apk-signer: zipalign + apksigner in one jar, run with Java.
+    Signer,
 }
 
 impl Tool {
@@ -19,6 +22,7 @@ impl Tool {
         match self {
             Tool::Apktool => "apktool",
             Tool::Jadx => "jadx",
+            Tool::Signer => "uber-apk-signer",
         }
     }
 
@@ -26,6 +30,7 @@ impl Tool {
         let path = match self {
             Tool::Apktool => settings.apktool_path.as_deref(),
             Tool::Jadx => settings.jadx_path.as_deref(),
+            Tool::Signer => settings.signer_path.as_deref(),
         };
         path.map(str::trim).filter(|p| !p.is_empty())
     }
@@ -46,8 +51,18 @@ pub struct ToolStatus {
 pub fn resolve(tool: Tool, settings: &Settings) -> Option<PathBuf> {
     match tool.configured(settings) {
         Some(p) => Some(PathBuf::from(p)).filter(|p| p.is_file()),
+        None if tool == Tool::Signer => find_jar_on_path(tool.id()),
         None => find_on_path(tool.id()),
     }
+}
+
+/// `java` or `keytool` from JAVA_HOME, falling back to PATH.
+pub fn java_tool(name: &str) -> Option<PathBuf> {
+    let exe = if cfg!(windows) { format!("{name}.exe") } else { name.to_string() };
+    env::var_os("JAVA_HOME")
+        .map(|home| PathBuf::from(home).join("bin").join(&exe))
+        .filter(|p| p.is_file())
+        .or_else(|| find_on_path(name))
 }
 
 pub fn status(tool: Tool, settings: &Settings) -> ToolStatus {
@@ -93,6 +108,17 @@ fn find_on_path(name: &str) -> Option<PathBuf> {
         exts.iter()
             .map(|ext| dir.join(format!("{name}{ext}")))
             .find(|candidate| candidate.is_file())
+    })
+}
+
+/// A jar named `<prefix>*.jar` in any PATH folder (jars can't run from PATH
+/// themselves, so their folder is what goes on PATH).
+fn find_jar_on_path(prefix: &str) -> Option<PathBuf> {
+    env::split_paths(&env::var_os("PATH")?).find_map(|dir| {
+        std::fs::read_dir(&dir).ok()?.filter_map(Result::ok).find_map(|e| {
+            let name = e.file_name().to_string_lossy().to_lowercase();
+            (name.starts_with(prefix) && name.ends_with(".jar")).then(|| e.path())
+        })
     })
 }
 

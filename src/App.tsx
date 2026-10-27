@@ -22,6 +22,21 @@ export default function App() {
 
   const current = view.kind === "project" ? projects.find((p) => p.id === view.id) : undefined;
 
+  const remove = async (project: ImportRecord) => {
+    const ok = window.confirm(
+      `Delete "${project.name}" from GameX?\n\nThis removes its workspace, including your edits and history. ` +
+        `The file you imported it from is not touched.`,
+    );
+    if (!ok) return;
+    try {
+      await api.deleteProject(project.id);
+    } catch (e) {
+      window.alert(`Couldn't delete the project: ${e}`);
+    }
+    if (view.kind === "project" && view.id === project.id) setView({ kind: "import" });
+    await refresh();
+  };
+
   return (
     <div className="app">
       <aside className="sidebar">
@@ -44,13 +59,21 @@ export default function App() {
         <ul className="project-list">
           {projects.length === 0 && <li className="muted small">Nothing imported yet.</li>}
           {projects.map((p) => (
-            <li key={p.id}>
+            <li key={p.id} className="project-item">
               <button
                 className={view.kind === "project" && view.id === p.id ? "nav active" : "nav"}
                 onClick={() => setView({ kind: "project", id: p.id })}
               >
                 <span className="project-name">{p.name}</span>
                 <span className="badge">{containerLabel[p.container]}</span>
+              </button>
+              <button
+                className="delete-project"
+                title={`Delete ${p.name}`}
+                aria-label={`Delete ${p.name}`}
+                onClick={() => remove(p)}
+              >
+                ×
               </button>
             </li>
           ))}

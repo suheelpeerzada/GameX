@@ -44,21 +44,49 @@ file by type so nothing is silently dropped.
 
 ## Integration interface
 
-Every engine integration implements the same Rust trait:
+Every engine integration implements the same Rust trait
+(`src-tauri/src/analyzer/mod.rs`):
 
 ```rust
 trait EngineIntegration {
     fn id(&self) -> &'static str;
-    /// 0.0 = definitely not this engine, 1.0 = certain.
-    fn detect(&self, tree: &FileTree) -> f32;
-    fn analyze(&self, tree: &FileTree) -> Result<GameProject, AnalyzeError>;
-    fn capabilities(&self, project: &GameProject) -> CapabilityReport;
+    fn name(&self) -> &'static str;
+    /// Score 0.0 = definitely not this engine, 1.0 = certain, plus evidence.
+    fn detect(&self, tree: &FileTree) -> Detection;
+    fn analyze(&self, tree: &FileTree, ctx: &Context) -> Vec<GameObject>;
+    fn capabilities(&self, tree: &FileTree, ctx: &Context, objects: &[GameObject]) -> Vec<Capability>;
     // Later phases, optional per engine:
     // fn apply_edit(...), fn rebuild(...), fn live_preview(...)
 }
 ```
 
-Unsupported operations return "not supported" instead of pretending.
+Integrations today: Godot, Unity, Native Android (Java/Kotlin) and Generic.
+The pipeline assembles the `GameProject` from what the chosen integration
+returns. Unsupported operations return "not supported" instead of pretending.
+
+## How classification stays universal
+
+GameX must work for any game, so classification never depends on one game's
+names. It has two layers:
+
+1. **Generic classifier** (`analyzer/classify.rs`), used for every game:
+   - File type first (images, audio, fonts, models, code, map formats...).
+   - Then general game vocabulary in the file name and its folders
+     ("enemy", "coin", "tileset", "button"...). Specific categories beat
+     Core, whole words beat prefixes, and the last word wins
+     (`map_icon` is an icon).
+   - Structural patterns: numbered images (`walk1`, `walk2`) become one
+     image set; a sprite drawn facing three or more directions
+     (`_u`, `_d`, `_left`...) is treated as a character.
+   - Anything with no signal goes to Unsorted.
+2. **Engine integrations** first claim the files they know for certain
+   (a Godot `.pck`, Unity `levelN` files, Android resources and code
+   classes) and leave every other file to the generic classifier.
+
+Every object records a confidence and a plain-language reason. Every file in
+`unpacked/` belongs to exactly one object; tests check this for each kind of
+game. Copies of the same file from different unpack steps (raw, apktool,
+jadx) are merged into one object, best-decoded copy first.
 
 ## Common model
 
@@ -80,9 +108,12 @@ Each import gets its own folder under the app data directory:
 <workspace>/<project-id>/
   original/      # the imported file, byte-for-byte, never modified
   unpacked/      # container output (e.g. apktool + jadx result)
-  edits/         # changed files only (phase 3)
-  history/       # snapshots for undo (phase 2+)
-  project.json   # cached GameProject
+  edits/         # changed files only, at the same path as in unpacked/
+  history/       # undo log (log.json) + snapshots of replaced edits
+  build/         # temporary work copy while building an APK
+  project.json   # what was imported and how each step went
+  analysis.json  # cached GameProject (redone when the analyzer changes)
+  overrides.json # the user's manual category changes (never redone)
 ```
 
 ## APK specifics
@@ -90,8 +121,24 @@ Each import gets its own folder under the app data directory:
 - Unpack with apktool (`apktool d`) and jadx (`jadx -d`) into `unpacked/`.
 - Engine detection inside the APK: `lib/*/libgodot_android.so` or `*.pck`
   → Godot; `libunity.so` / `assets/bin/Data` → Unity; otherwise native.
-- Rebuilding (phase 3): `apktool b` → `zipalign` → `apksigner` with a
-  user-owned debug key. The user's key is created once and stored locally.
+- Editing (`src-tauri/src/edits.rs`): only apktool's output (smali,
+  resources, manifest) is editable, because that is what gets rebuilt.
+  jadx's Java is a read-only view; decompiled Java can't be recompiled
+  reliably. Edits go to `edits/`, never to `unpacked/`, and every change
+  (edit, replace, restore) is logged so it can be undone.
+- Rebuilding (`src-tauri/src/rebuild.rs`): copy apktool's output to
+  `build/work`, overlay the edits, apply the build dialog's choices (name,
+  icon, package, version, permissions), `apktool b`, then zipalign + sign
+  with uber-apk-signer (v1/v2/v3 signatures).
+- Signing: a game can't be re-signed with its developer's key, since an
+  APK only carries the public certificate. GameX creates one key per user
+  with keytool on the first build (`<app data>/signing/gamex-key.jks`).
+  A rebuilt game therefore can't install over the original. To install
+  both side by side, change the package name in the build dialog.
+- Package renaming: apktool 3 dropped `renameManifestPackage`, so GameX
+  edits the manifest. It first makes relative class names absolute, then
+  renames provider authorities and custom permissions that start with the
+  old package.
 - Scope: offline single-player games only.
 
 ## Rules (from the roadmap)
@@ -107,3 +154,4 @@ Each import gets its own folder under the app data directory:
 ## First target
 
 Draky, as an APK, through: Import → Analyze → Categorize → Inspect → Ask AI.
+Draky is a test case only: nothing in the analyzer is specific to it.

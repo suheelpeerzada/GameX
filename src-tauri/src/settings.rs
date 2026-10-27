@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 pub struct Settings {
     pub apktool_path: Option<String>,
     pub jadx_path: Option<String>,
+    /// uber-apk-signer's `.jar`.
+    pub signer_path: Option<String>,
 }
 
 impl Settings {

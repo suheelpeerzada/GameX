@@ -1,6 +1,6 @@
 [package]
 name = "gamex"
-version = "0.9.3"
+version = "0.9.4"
 description = "Import offline games and edit their content in one universal editor"
 edition = "2021"
 

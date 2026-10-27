@@ -27,7 +27,7 @@ use crate::workspace::Workspace;
 use tree::FileTree;
 
 /// Bump when analysis output changes, so cached results are redone.
-pub const ANALYZER_VERSION: u32 = 3;
+pub const ANALYZER_VERSION: u32 = 4;
 
 pub struct Detection {
     /// 0.0 = definitely not this engine, 1.0 = certain.

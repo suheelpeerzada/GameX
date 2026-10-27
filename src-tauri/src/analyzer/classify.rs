@@ -47,15 +47,16 @@ const ITEM_WORDS: &[&str] = &[
     "food", "scroll", "orb", "relic", "weapons", "projectile",
 ];
 const MAP_WORDS: &[&str] = &[
-    "map", "level", "stage", "world", "tile", "tileset", "tilemap", "room", "maze", "terrain",
+    "map", "level", "lvl", "stage", "world", "tile", "tileset", "tilemap", "room", "maze", "terrain",
     "dungeon", "area", "zone", "background", "bg", "backdrop", "parallax", "platform", "ground",
-    "floor", "wall", "door", "ladder", "stairs", "sky", "scenery", "landscape",
+    "floor", "wall", "door", "ladder", "stairs", "sky", "scenery", "landscape", "cloud", "mountain", "hill",
+    "block", "spike", "teleport", "portal", "trap", "hazard", "obstacle",
 ];
 const UI_WORDS: &[&str] = &[
     "ui", "gui", "hud", "menu", "button", "btn", "icon", "ico", "logo", "font", "title",
     "splash", "dialog", "popup", "panel", "cursor", "healthbar", "score", "label", "banner",
     "pause", "loading", "joystick", "dpad", "gamepad", "touch", "controls", "overlay", "screen",
-    "lang", "locale", "localization", "strings", "translation",
+    "lang", "locale", "localization", "strings", "translation", "hint", "style", "theme",
 ];
 const CORE_WORDS: &[&str] = &[
     "config", "settings", "prefs", "preferences", "save", "savegame", "game", "main", "engine",
@@ -602,6 +603,7 @@ mod tests {
             ("audio/level_theme.mp3", Category::Audio, "music"),
             ("fonts/main.ttf", Category::Ui, "font"),
             ("levels/one.tmx", Category::Map, "map data"),
+            ("scenes/lvl_12.json", Category::Map, "data"),
             ("data/items.json", Category::Items, "data"),
             ("data/config.ini", Category::Core, "data"),
             ("data/blob.json", Category::Unsorted, "data"),

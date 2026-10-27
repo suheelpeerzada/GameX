@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { api, extensionOf, formatBytes, isEditablePath, mediaExtensions, pickFile } from "../lib/api";
 import { categories, categoryLabel } from "../lib/categories";
 import type { Category, EditState, GameObject, Preview, References } from "../lib/types";
-import { CategoryIcon, ObjectIcon, fileType, isImagePath } from "../lib/visuals";
+import { CategoryIcon, ObjectIcon, UNEDITABLE_FORMATS, fileType, isImagePath } from "../lib/visuals";
 
 type Section = "details" | "properties" | "code" | "references";
 
@@ -502,6 +502,15 @@ function FileActions(props: {
         ) : (
           twin && <button onClick={() => props.onChoose(twin)}>Open the editable copy</button>
         )}
+      </div>
+    );
+  }
+
+  if (UNEDITABLE_FORMATS.has(extensionOf(file))) {
+    return (
+      <div className="notice small">
+        This is {fileType(file).label === "File" ? "an exported engine file" : `a ${fileType(file).label.toLowerCase()}`} in the
+        engine's own exported format. GameX can show it, but editing or replacing this format isn't supported yet.
       </div>
     );
   }

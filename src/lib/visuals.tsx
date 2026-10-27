@@ -40,6 +40,8 @@ export function CategoryIcon({ category, size = 15 }: { category: Category; size
 }
 
 const IMAGE = ["png", "jpg", "jpeg", "webp", "gif", "bmp", "svg", "ico"];
+/** Godot's exported textures; GameX previews the image inside. */
+const TEXTURE = ["ctex"];
 const AUDIO = ["ogg", "mp3", "wav", "m4a", "aac", "flac", "mid", "midi"];
 const CODE = ["java", "kt", "smali", "lua", "js", "ts", "py", "gd", "cs", "c", "cpp", "h", "glsl", "shader"];
 
@@ -47,6 +49,10 @@ const CODE = ["java", "kt", "smali", "lua", "js", "ts", "py", "gd", "cs", "c", "
 export function fileType(path: string): { label: string; Icon: LucideIcon } {
   const ext = (path.split(".").pop() ?? "").toLowerCase();
   if (IMAGE.includes(ext)) return { label: "Image", Icon: FileImage };
+  if (TEXTURE.includes(ext)) return { label: "Texture", Icon: FileImage };
+  if (["oggvorbisstr", "sample", "mp3str"].includes(ext)) return { label: "Godot audio", Icon: FileMusic };
+  if (ext === "gdc") return { label: "Compiled script", Icon: FileCode };
+  if (ext === "scn") return { label: "Scene", Icon: File };
   if (AUDIO.includes(ext)) return { label: "Audio", Icon: FileMusic };
   if (ext === "java") return { label: "Java", Icon: FileCode };
   if (ext === "smali") return { label: "Smali", Icon: FileCode };
@@ -69,5 +75,9 @@ export const containerLongLabel: Record<ContainerKind, string> = {
 };
 
 export function isImagePath(path: string) {
-  return IMAGE.includes((path.split(".").pop() ?? "").toLowerCase());
+  const ext = (path.split(".").pop() ?? "").toLowerCase();
+  return IMAGE.includes(ext) || TEXTURE.includes(ext);
 }
+
+/** Exported engine formats GameX can show but not edit yet. */
+export const UNEDITABLE_FORMATS = new Set(["ctex", "scn", "gdc", "res", "oggvorbisstr", "sample", "mp3str", "fontdata"]);

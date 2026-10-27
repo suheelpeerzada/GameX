@@ -169,6 +169,17 @@ fn claim_package_files(b: &mut Builder) {
                 "Android's compiled index of every resource (apktool decodes it into res/values)",
             ),
             "apktool.yml" => Placement::new(Category::Core, "unpack metadata", 0.9, "written by apktool; needed to rebuild the APK"),
+            _ if f.ext() == "kotlin_builtins"
+                || matches!(f.name(), "kotlin-tooling-metadata.json" | "DebugProbesKt.bin") =>
+            {
+                Placement::new(Category::Code, "library data", 0.85, "data for the Kotlin standard library, not the game")
+            }
+            _ if matches!(f.name(), "baseline.prof" | "baseline.profm") => Placement::new(
+                Category::Core,
+                "Android runtime profile",
+                0.85,
+                "tells Android which code to precompile; not game content",
+            ),
             _ => continue,
         };
         let props = file_props(tree, f);

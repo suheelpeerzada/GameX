@@ -985,3 +985,5 @@ input[type="text"], input[type="password"], input[type="number"], select, textar
 .gameplay-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
 .gameplay-value { grid-row: span 2; align-self: center; font-size: 14px; color: var(--accent); }
 pre.code { line-height: 1.5; }
+
+.tabs-scroll { scrollbar-width: thin; }

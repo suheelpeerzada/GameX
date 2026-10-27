@@ -75,6 +75,13 @@ pub fn preview(project_root: &Path, rel: &str) -> io::Result<Preview> {
     let size = fs::metadata(&real)?.len();
     let ext = rel.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
 
+    if ext == "ctex" {
+        let bytes = fs::read(&real)?;
+        if let Some((mime, data)) = embedded_image(&bytes) {
+            let data_url = format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(data));
+            return Ok(Preview::Image { data_url, size });
+        }
+    }
     if let Some((mime, image)) = media_type(&ext) {
         if size > MAX_MEDIA {
             return Ok(Preview::TooLarge { size });
@@ -116,8 +123,24 @@ pub fn preview(project_root: &Path, rel: &str) -> io::Result<Preview> {
     Ok(Preview::Binary { head, size })
 }
 
-/// UTF-8 with no NUL bytes; a character cut off at the end is tolerated.
+/// The WebP or PNG image inside a Godot `.ctex` texture, if it holds one
+/// (lossless textures do; GPU-compressed ones don't).
+fn embedded_image(bytes: &[u8]) -> Option<(&'static str, &[u8])> {
+    let find = |needle: &[u8]| bytes.windows(needle.len()).position(|w| w == needle);
+    if let Some(start) = find(b"RIFF").filter(|&s| bytes.get(s + 8..s + 12) == Some(b"WEBP")) {
+        let len = u32::from_le_bytes(bytes.get(start + 4..start + 8)?.try_into().ok()?) as usize + 8;
+        return Some(("image/webp", bytes.get(start..start + len)?));
+    }
+    let start = find(b"\x89PNG")?;
+    let end = bytes[start..].windows(4).position(|w| w == b"IEND")? + start + 8;
+    Some(("image/png", bytes.get(start..end)?))
+}
+
+/// UTF-8 with no NUL bytes; a character cut off at the end, and NUL padding
+/// at the end (Godot writes some text files that way), are tolerated.
 fn as_text(buf: &[u8]) -> Option<String> {
+    let end = buf.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
+    let buf = &buf[..end];
     if buf.contains(&0) {
         return None;
     }
@@ -150,6 +173,21 @@ mod tests {
         assert!(preview(root, "a/../../secret.txt").is_err());
         assert!(preview(root, &root.join("secret.txt").to_string_lossy()).is_err());
         assert!(read_text(root, "a/blob.bin").is_err());
+
+        // Godot: a texture's embedded WebP is shown; NUL padding is still text.
+        let mut ctex = b"GST2\x01\0\0\0\x02\0\0\0\x02\0\0\0".to_vec();
+        ctex.extend_from_slice(b"padRIFF\x04\0\0\0WEBPtail");
+        fs::write(unpacked.join("a/t.ctex"), &ctex).unwrap();
+        match preview(root, "a/t.ctex").unwrap() {
+            Preview::Image { data_url, .. } => {
+                let b64 = data_url.strip_prefix("data:image/webp;base64,").unwrap();
+                let data = base64::engine::general_purpose::STANDARD.decode(b64).unwrap();
+                assert_eq!(data, b"RIFF\x04\0\0\0WEBP");
+            }
+            other => panic!("{other:?}"),
+        }
+        fs::write(unpacked.join("a/x.import"), b"[remap]\npath=\"res://x\"\n\0").unwrap();
+        assert!(matches!(preview(root, "a/x.import").unwrap(), Preview::Text { .. }));
 
         // Edited files are shown as edited.
         fs::create_dir_all(root.join("edits/a")).unwrap();

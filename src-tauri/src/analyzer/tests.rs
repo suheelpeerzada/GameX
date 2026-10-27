@@ -374,3 +374,63 @@ fn classes_inherit_roles_and_report_gameplay_values() {
     let characters = p.capabilities.iter().find(|c| c.feature == "characters").unwrap();
     assert!(characters.note.contains("enemy"), "{}", characters.note);
 }
+
+/// Godot 4 export with loose files: `.import` / `.remap` link each original
+/// asset to its exported file under `.godot/`.
+#[test]
+fn godot4_loose_export() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = dir.path();
+    touch(r, "raw/AndroidManifest.xml", "\u{3}\u{0}binary");
+    touch(r, "raw/lib/arm64-v8a/libgodot_android.so", "so");
+    touch(r, "raw/assets/project.binary", "ECFG");
+    touch(
+        r,
+        "raw/assets/Sprites/Floor/tile.png.import",
+        "[remap]\n\nimporter=\"texture\"\ntype=\"CompressedTexture2D\"\npath=\"res://.godot/imported/tile.png-abc.ctex\"\n\u{0}",
+    );
+    touch(r, "raw/assets/.godot/imported/tile.png-abc.ctex", "GST2\u{1}\u{0}\u{0}\u{0}\u{20}\u{0}\u{0}\u{0}\u{10}\u{0}\u{0}\u{0}RIFF");
+    touch(
+        r,
+        "raw/assets/Audio/Music/theme.ogg.import",
+        "[remap]\ntype=\"AudioStreamOggVorbis\"\npath=\"res://.godot/imported/theme.ogg-1.oggvorbisstr\"\n",
+    );
+    touch(r, "raw/assets/.godot/imported/theme.ogg-1.oggvorbisstr", "RSRC");
+    touch(r, "raw/assets/Scenes/Level1.tscn.remap", "[remap]\n\npath=\"res://.godot/exported/1/export-x-Level1.scn\"\n");
+    touch(r, "raw/assets/.godot/exported/1/export-x-Level1.scn", "RSRC");
+    touch(r, "raw/assets/Scripts/player.gd.remap", "[remap]\n\npath=\"res://Scripts/player.gdc\"\n");
+    touch(r, "raw/assets/Scripts/player.gdc", "GDSC");
+    // Exported, but nothing points to it; and a file nobody knows.
+    touch(r, "raw/assets/.godot/imported/orphan.png-9.ctex", "GST2");
+    touch(r, "raw/assets/_cl_", "?");
+    touch(r, "raw/assets/Themes/ButtonTheme.tres.remap", "[remap]\npath=\"res://.godot/exported/1/export-y-ButtonTheme.res\"\n");
+    touch(r, "raw/assets/.godot/exported/1/export-y-ButtonTheme.res", "RSRC");
+    touch(r, "raw/kotlin/collections.kotlin_builtins", "kt");
+    touch(r, "raw/assets/dexopt/baseline.prof", "pro");
+
+    let p = analyze(&record(ContainerKind::Apk, &["raw"]), r);
+    assert_eq!(p.engine.id, "godot");
+    assert_every_file_once(r, &p);
+
+    let tile = object(&p, "godot:assets/Sprites/Floor/tile.png");
+    assert_eq!((tile.category, tile.kind.as_str(), tile.display_name.as_str()), (Category::Map, "image", "tile.png"));
+    // The exported texture comes first, so it is what gets previewed.
+    assert_eq!(tile.source_files[0], "raw/assets/.godot/imported/tile.png-abc.ctex");
+    assert!(tile.properties.iter().any(|p| p.label == "Dimensions" && p.value == "32 × 16"));
+
+    assert_eq!(object(&p, "godot:assets/Audio/Music/theme.ogg").kind, "music");
+    let level = object(&p, "godot:assets/Scenes/Level1.tscn");
+    assert_eq!((level.category, level.kind.as_str()), (Category::Map, "scene"));
+    let script = object(&p, "godot:assets/Scripts/player.gd");
+    assert_eq!((script.category, script.kind.as_str()), (Category::Characters, "GDScript (compiled)"));
+    assert_eq!(script.role.as_deref(), Some("Player"));
+    assert_eq!(object(&p, "file:assets/.godot/imported/orphan.png-9.ctex").category, Category::Assets);
+    assert_eq!(object(&p, "file:assets/_cl_").category, Category::Unsorted);
+    assert_eq!(object(&p, "godot:assets/Themes/ButtonTheme.tres").category, Category::Ui);
+    assert_eq!(object(&p, "file:kotlin/collections.kotlin_builtins").kind, "library data");
+    assert_eq!(object(&p, "file:assets/dexopt/baseline.prof").category, Category::Core);
+
+    assert_eq!(status(&p, "code"), CapabilityStatus::Unsupported);
+    assert_eq!(status(&p, "assets"), CapabilityStatus::Partial);
+    assert_eq!(status(&p, "visualEditing"), CapabilityStatus::Unsupported);
+}

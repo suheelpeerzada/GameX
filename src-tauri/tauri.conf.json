@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "GameX",
-  "version": "0.4.1",
+  "version": "0.9.3",
   "identifier": "com.gamex.app",
   "build": {
     "beforeDevCommand": "npm run dev",

@@ -225,3 +225,17 @@ export interface Proposal {
   model: string;
   trimmed: string | null;
 }
+
+export interface ClassReference {
+  /** The referring class, e.g. com.game.World. */
+  class: string;
+  method: string | null;
+  line: string;
+}
+
+export interface References {
+  items: ClassReference[];
+  more: number;
+  /** False for files that aren't Java/smali classes. */
+  supported: boolean;
+}

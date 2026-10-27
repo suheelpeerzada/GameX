@@ -333,6 +333,19 @@ pub async fn ai_ask(
     .map_err(|e| e.to_string())?
 }
 
+/// Where other classes use this class. No AI involved.
+#[tauri::command]
+pub async fn get_references(
+    state: State<'_, AppState>,
+    id: String,
+    path: String,
+) -> Result<ai::References, String> {
+    let project = state.workspace().project_dir(&id).map_err(|e| e.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || ai::references(&project, &path))
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Asks the AI for edits. Nothing is saved: the UI shows the proposal and
 /// saves it through `save_text_file` only if the user approves.
 #[tauri::command]

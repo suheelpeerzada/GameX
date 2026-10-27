@@ -1,7 +1,11 @@
+import { ChevronDown, ChevronLeft, ChevronRight, ChevronUp } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { api, extensionOf, formatBytes, isEditablePath, mediaExtensions, pickFile } from "../lib/api";
 import { categories, categoryLabel } from "../lib/categories";
-import type { Category, EditState, GameObject, Preview } from "../lib/types";
+import type { Category, EditState, GameObject, Preview, References } from "../lib/types";
+import { CategoryIcon, ObjectIcon, fileType, isImagePath } from "../lib/visuals";
+
+type Section = "details" | "properties" | "code" | "references";
 
 interface Props {
   projectId: string;
@@ -9,18 +13,26 @@ interface Props {
   edited: Set<string>;
   /** Goes up after every edit, so previews reload. */
   revision: number;
+  /** Objects with related names, shown under Details. */
+  related: GameObject[];
+  /** Opens another object in a tab. */
+  onOpen: (id: string) => void;
   onMove: (category: Category | null) => void;
   onEdited: (state: EditState) => void;
   /** Reports the file shown and the selected text, for the AI group. */
   onContext: (file: string | null, selection: string) => void;
 }
 
-export default function Inspector({ projectId, object, edited, revision, onMove, onEdited, onContext }: Props) {
-  // The parent keys this component by object id, so this resets per object.
+const TEXT_FILE = /\.(java|smali|kt|xml|json|ya?ml|txt|csv|ini|cfg|lua|js|ts|py|gd|cs|c|cpp|h|glsl|md)$/i;
+
+export default function Inspector(props: Props) {
+  const { projectId, object, edited, revision, related, onOpen, onMove, onEdited, onContext } = props;
+  // The parent keeps one Inspector per tab, so this state lasts per tab.
   const [file, setFile] = useState(object.sourceFiles[0] ?? null);
+  const [section, setSection] = useState<Section>("details");
   const [editing, setEditing] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Text selected in the preview, for "Explain selection".
+  // Text selected in the preview or editor, for "Explain selection".
   const [selection, setSelection] = useState("");
   const previewRef = useRef<HTMLDivElement>(null);
 
@@ -36,8 +48,6 @@ export default function Inspector({ projectId, object, edited, revision, onMove,
     setSelection(inside ? sel.toString() : "");
   };
 
-  const moved = object.category !== object.autoCategory;
-
   const run = async (action: () => Promise<EditState>) => {
     setError(null);
     try {
@@ -47,120 +57,373 @@ export default function Inspector({ projectId, object, edited, revision, onMove,
     }
   };
 
-  const choose = (f: string) => {
+  /** Shows a file in the Code tab. */
+  const choose = (f: string, edit = false) => {
     setFile(f);
-    setEditing(false);
+    setEditing(edit);
     setError(null);
     setSelection("");
+    setSection("code");
   };
+
+  const codeLabel = object.sourceFiles.some((f) => TEXT_FILE.test(f)) ? "Code" : "File";
+  const sections: [Section, string][] = [
+    ["details", "Details"],
+    ["properties", "Properties"],
+    ["code", codeLabel],
+    ["references", "References"],
+  ];
 
   return (
     <div className="inspector">
-      <div className="inspector-head">
-        <div>
-          <h2>{object.displayName}</h2>
-          <div className="muted">{object.kind}</div>
-        </div>
-        <label className="move">
-          <span className="muted small">Category</span>
-          <select
-            value={object.category}
-            onChange={(e) => {
-              const value = e.target.value as Category;
-              onMove(value === object.autoCategory ? null : value);
-            }}
+      <MediaCard projectId={projectId} object={object} revision={revision} onPick={(f) => choose(f)} />
+
+      <div className="section-tabs" role="tablist">
+        {sections.map(([id, label]) => (
+          <button
+            key={id}
+            role="tab"
+            aria-selected={section === id}
+            className={section === id ? "section-tab active" : "section-tab"}
+            onClick={() => setSection(id)}
           >
-            {categories.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.label}
-              </option>
-            ))}
-          </select>
-        </label>
-      </div>
-
-      <div className={moved ? "why moved" : "why"}>
-        {moved ? (
-          <>
-            You moved this to {categoryLabel[object.category]}. GameX had put it in{" "}
-            {categoryLabel[object.autoCategory]} because {object.reason}.{" "}
-            <button className="link" onClick={() => onMove(null)}>
-              Undo
-            </button>
-          </>
-        ) : (
-          <>
-            In {categoryLabel[object.category]} because {object.reason}.
-            <span className="confidence" title="How sure the analyzer is">
-              <span className="bar">
-                <span style={{ width: `${Math.round(object.confidence * 100)}%` }} />
-              </span>
-              {Math.round(object.confidence * 100)}% sure
-            </span>
-          </>
-        )}
-      </div>
-
-      {object.properties.length > 0 && (
-        <dl className="details">
-          {object.properties.map((p) => (
-            <Detail key={p.label} label={p.label} value={p.value} />
-          ))}
-        </dl>
-      )}
-
-      <h3>Files ({object.sourceFiles.length})</h3>
-      <ul className="files">
-        {object.sourceFiles.map((f) => (
-          <li key={f}>
-            <button className={f === file ? "file selected mono" : "file mono"} onClick={() => choose(f)}>
-              {f}
-              {edited.has(f) && <span className="tag">edited</span>}
-              {!isEditablePath(f) && <span className="tag muted-tag">read-only</span>}
-            </button>
-          </li>
+            {label}
+          </button>
         ))}
-      </ul>
+      </div>
 
-      {file && (
-        <FileActions
+      {section === "details" && (
+        <DetailsSection
           object={object}
-          file={file}
-          edited={edited.has(file)}
-          editing={editing}
-          onEdit={() => setEditing(true)}
-          onChoose={(f) => {
-            choose(f);
-            setEditing(true);
-          }}
-          onReplace={async () => {
-            const ext = extensionOf(file);
-            const source = await pickFile(`.${ext} file`, [ext]);
-            if (source) await run(() => api.replaceFile(projectId, file, source));
-          }}
-          onRevert={() => run(() => api.revertFile(projectId, file))}
+          edited={edited}
+          related={related}
+          onMove={onMove}
+          onPick={(f) => choose(f)}
+          onOpen={onOpen}
         />
       )}
-      {error && <div className="panel error small">{error}</div>}
 
-      {file &&
-        (editing ? (
-          <TextEditor
-            projectId={projectId}
-            path={file}
-            onSelectText={setSelection}
-            onCancel={() => setEditing(false)}
-            onSaved={(state) => {
-              onEdited(state);
-              setEditing(false);
-            }}
-          />
+      {section === "properties" &&
+        (object.properties.length > 0 ? (
+          <dl className="details card-body">
+            {object.properties.map((p) => (
+              <Detail key={p.label} label={p.label} value={p.value} />
+            ))}
+          </dl>
         ) : (
-          <div ref={previewRef} onMouseUp={captureSelection} onKeyUp={captureSelection}>
-            <FilePreview key={`${file}:${revision}`} projectId={projectId} path={file} />
-          </div>
+          <p className="muted small">No extra properties were recorded for this object.</p>
         ))}
 
+      {section === "code" && (
+        <>
+          <ul className="file-pills">
+            {object.sourceFiles.map((f) => {
+              const { label, Icon } = fileType(f);
+              return (
+                <li key={f}>
+                  <button
+                    className={f === file ? "file-pill selected" : "file-pill"}
+                    onClick={() => choose(f)}
+                    title={f}
+                  >
+                    <Icon size={13} />
+                    <span>{f.split("/").pop()}</span>
+                    <span className="file-pill-meta">
+                      {label} · {f.split("/")[0]}
+                    </span>
+                    {edited.has(f) && <span className="tag">edited</span>}
+                    {!isEditablePath(f) && <span className="tag muted-tag">read-only</span>}
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+          {file && (
+            <FileActions
+              object={object}
+              file={file}
+              edited={edited.has(file)}
+              editing={editing}
+              onEdit={() => setEditing(true)}
+              onChoose={(f) => choose(f, true)}
+              onReplace={async () => {
+                const ext = extensionOf(file);
+                const source = await pickFile(`.${ext} file`, [ext]);
+                if (source) await run(() => api.replaceFile(projectId, file, source));
+              }}
+              onRevert={() => run(() => api.revertFile(projectId, file))}
+            />
+          )}
+          {error && <div className="panel error small">{error}</div>}
+          {file &&
+            (editing ? (
+              <TextEditor
+                projectId={projectId}
+                path={file}
+                onSelectText={setSelection}
+                onCancel={() => setEditing(false)}
+                onSaved={(state) => {
+                  onEdited(state);
+                  setEditing(false);
+                }}
+              />
+            ) : (
+              <div ref={previewRef} onMouseUp={captureSelection} onKeyUp={captureSelection}>
+                <FilePreview key={`${file}:${revision}`} projectId={projectId} path={file} />
+              </div>
+            ))}
+        </>
+      )}
+
+      {section === "references" && <ReferencesSection projectId={projectId} object={object} onOpen={onOpen} />}
+    </div>
+  );
+}
+
+/** One copy per file name: the best-decoded copy comes first in sourceFiles. */
+function uniqueByName(files: string[]): string[] {
+  const seen = new Set<string>();
+  return files.filter((f) => {
+    const name = f.split("/").pop() ?? f;
+    if (seen.has(name)) return false;
+    seen.add(name);
+    return true;
+  });
+}
+
+const FRAMES_PER_PAGE = 8;
+
+/** The card at the top: frames for images, otherwise a summary. */
+function MediaCard(props: { projectId: string; object: GameObject; revision: number; onPick: (f: string) => void }) {
+  const { projectId, object, revision, onPick } = props;
+  const [page, setPage] = useState(0);
+  const frames = uniqueByName(object.sourceFiles.filter(isImagePath));
+  const pages = Math.ceil(frames.length / FRAMES_PER_PAGE);
+  const prop = (label: string) => object.properties.find((p) => p.label === label)?.value;
+  const meta = [
+    fileType(object.sourceFiles[0] ?? "").label,
+    prop("Frames") && `${prop("Frames")} frames`,
+    prop("Dimensions")?.replace(" × ", "×"),
+    prop("File size"),
+    !frames.length && `${uniqueByName(object.sourceFiles).length} file${object.sourceFiles.length === 1 ? "" : "s"}`,
+  ].filter(Boolean);
+
+  return (
+    <section className="media-card">
+      {frames.length > 0 ? (
+        <>
+          <div className="gallery">
+            {pages > 1 && (
+              <button
+                className="gallery-arrow"
+                aria-label="Previous frames"
+                onClick={() => setPage((p) => (p - 1 + pages) % pages)}
+              >
+                <ChevronLeft size={18} />
+              </button>
+            )}
+            <div className="frames">
+              {frames.slice(page * FRAMES_PER_PAGE, (page + 1) * FRAMES_PER_PAGE).map((f) => (
+                <button key={f} className="frame" onClick={() => onPick(f)} title={f}>
+                  <Thumbnail projectId={projectId} path={f} revision={revision} />
+                  <span className="frame-label">{(f.split("/").pop() ?? f).replace(/\.[^.]+$/, "")}</span>
+                </button>
+              ))}
+            </div>
+            {pages > 1 && (
+              <button className="gallery-arrow" aria-label="Next frames" onClick={() => setPage((p) => (p + 1) % pages)}>
+                <ChevronRight size={18} />
+              </button>
+            )}
+          </div>
+          {pages > 1 && (
+            <div className="dots">
+              {Array.from({ length: pages }, (_, i) => (
+                <span key={i} className={i === page ? "dot active" : "dot"} />
+              ))}
+            </div>
+          )}
+        </>
+      ) : (
+        <div className="media-summary-icon">
+          <ObjectIcon object={object} size={28} />
+        </div>
+      )}
+      <div className="media-caption">
+        <div className="media-title">
+          <CategoryIcon category={object.category} size={13} />
+          <span>{object.displayName}</span>
+        </div>
+        <div className="muted small">{meta.join("  •  ")}</div>
+      </div>
+    </section>
+  );
+}
+
+function Thumbnail({ projectId, path, revision }: { projectId: string; path: string; revision: number }) {
+  const [src, setSrc] = useState<string | null>(null);
+  useEffect(() => {
+    let current = true;
+    api
+      .readPreview(projectId, path)
+      .then((p) => current && p.type === "image" && setSrc(p.dataUrl))
+      .catch(() => {});
+    return () => {
+      current = false;
+    };
+  }, [projectId, path, revision]);
+  return <span className="thumb">{src && <img src={src} alt="" />}</span>;
+}
+
+function DetailsSection(props: {
+  object: GameObject;
+  edited: Set<string>;
+  related: GameObject[];
+  onMove: (category: Category | null) => void;
+  onPick: (f: string) => void;
+  onOpen: (id: string) => void;
+}) {
+  const { object, edited, related, onMove, onPick, onOpen } = props;
+  const [relatedOpen, setRelatedOpen] = useState(true);
+  const moved = object.category !== object.autoCategory;
+  const confidence = Math.round(object.confidence * 100);
+  const confidenceColor = confidence >= 70 ? "var(--ok)" : confidence >= 45 ? "var(--warn)" : "var(--bad)";
+
+  return (
+    <>
+      <div className="details-grid">
+        <dl className="info-list">
+          <dt>Name</dt>
+          <dd>{object.displayName}</dd>
+          <dt>Kind</dt>
+          <dd>{object.kind}</dd>
+          <dt>Category</dt>
+          <dd>
+            <select
+              value={object.category}
+              onChange={(e) => {
+                const value = e.target.value as Category;
+                onMove(value === object.autoCategory ? null : value);
+              }}
+            >
+              {categories.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.label}
+                </option>
+              ))}
+            </select>
+          </dd>
+          <dt>Confidence</dt>
+          <dd className="confidence-row">
+            <span style={{ color: confidenceColor }}>{confidence}%</span>
+            <span className="bar">
+              <span style={{ width: `${confidence}%`, background: confidenceColor }} />
+            </span>
+          </dd>
+          <dt>Reason</dt>
+          <dd className="small">
+            {moved ? (
+              <>
+                You moved this from {categoryLabel[object.autoCategory]}. GameX had placed it there because{" "}
+                {object.reason}.{" "}
+                <button className="link" onClick={() => onMove(null)}>
+                  Undo
+                </button>
+              </>
+            ) : (
+              <>{object.reason[0]?.toUpperCase() + object.reason.slice(1)}.</>
+            )}
+          </dd>
+        </dl>
+
+        <div className="card source-files">
+          <h4>Source Files</h4>
+          <ul>
+            {object.sourceFiles.map((f) => {
+              const { label, Icon } = fileType(f);
+              return (
+                <li key={f}>
+                  <button onClick={() => onPick(f)} title={f}>
+                    <Icon size={14} className="object-icon" />
+                    <span className="source-name">{f.split("/").pop()}</span>
+                    {edited.has(f) && <span className="edited-dot" title="Edited" />}
+                    <span className="source-type">{label}</span>
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      </div>
+
+      {related.length > 0 && (
+        <div className="card related">
+          <button className="related-head" onClick={() => setRelatedOpen((o) => !o)}>
+            {relatedOpen ? <ChevronUp size={15} /> : <ChevronDown size={15} />}
+            <span>Related Objects</span>
+          </button>
+          {relatedOpen && (
+            <ul>
+              {related.map((r) => (
+                <li key={r.id}>
+                  <button onClick={() => onOpen(r.id)}>
+                    <ObjectIcon object={r} size={15} />
+                    <span className="related-name">{r.displayName}</span>
+                    <span className="related-kind">{r.kind}</span>
+                    <ChevronRight size={15} className="muted" />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+    </>
+  );
+}
+
+/** Where other classes use this one, found in smali (no AI needed). */
+function ReferencesSection(props: { projectId: string; object: GameObject; onOpen: (id: string) => void }) {
+  const { projectId, object, onOpen } = props;
+  const classFile = object.sourceFiles.find((f) => f.endsWith(".java") || f.endsWith(".smali"));
+  const [refs, setRefs] = useState<References | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!classFile) return;
+    api
+      .getReferences(projectId, classFile)
+      .then(setRefs)
+      .catch((e) => setError(String(e)));
+  }, [projectId, classFile]);
+
+  if (!classFile) return <p className="muted small">References are found for code classes only.</p>;
+  if (error) return <div className="panel error small">{error}</div>;
+  if (!refs) return <p className="muted small">Searching the game's code…</p>;
+  if (refs.items.length === 0) return <p className="muted small">No other class refers to this one directly.</p>;
+
+  return (
+    <div className="card references">
+      <p className="muted small">
+        Used in {refs.items.length + refs.more} place{refs.items.length + refs.more === 1 ? "" : "s"} across the
+        game's code.
+      </p>
+      <ul>
+        {refs.items.map((r, i) => {
+          const outer = r.class.split("$")[0];
+          const simple = outer.split(".").pop();
+          return (
+            <li key={i}>
+              <button onClick={() => onOpen(`class:${outer}`)} title={`Open ${outer}`}>
+                <span className="ref-class">{simple}</span>
+                {r.method && <span className="muted small"> in {r.method}()</span>}
+                <code className="ref-line">{r.line}</code>
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+      {refs.more > 0 && <p className="muted small">…and {refs.more} more.</p>}
     </div>
   );
 }

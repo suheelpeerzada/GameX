@@ -39,6 +39,7 @@ pub fn run() {
             commands::build_apk,
             commands::read_png,
             commands::ai_status,
+            commands::get_references,
             commands::ai_set_key,
             commands::ai_models,
             commands::ai_set_model,

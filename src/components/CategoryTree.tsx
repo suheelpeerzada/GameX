@@ -1,6 +1,8 @@
-import { useMemo, useState } from "react";
+import { ChevronDown, ChevronRight, Search } from "lucide-react";
+import { useMemo, useState, type RefObject } from "react";
 import { categories } from "../lib/categories";
 import type { Category, GameObject } from "../lib/types";
+import { CategoryIcon, ObjectIcon } from "../lib/visuals";
 
 const PAGE = 200;
 
@@ -10,10 +12,12 @@ interface Props {
   edited: Set<string>;
   selectedId: string | null;
   onSelect: (id: string) => void;
+  /** Lets the header's search button focus the search box. */
+  searchRef?: RefObject<HTMLInputElement | null>;
 }
 
 /** Category -> kind -> objects. Kinds are shown only when a category has more than one. */
-export default function CategoryTree({ objects, edited, selectedId, onSelect }: Props) {
+export default function CategoryTree({ objects, edited, selectedId, onSelect, searchRef }: Props) {
   const [filter, setFilter] = useState("");
   const [open, setOpen] = useState<Set<string>>(() => new Set());
   const [shown, setShown] = useState<Record<string, number>>({});
@@ -47,6 +51,9 @@ export default function CategoryTree({ objects, edited, selectedId, onSelect }: 
       return next;
     });
 
+  const chevron = (expanded: boolean) =>
+    expanded ? <ChevronDown size={14} className="chevron" /> : <ChevronRight size={14} className="chevron" />;
+
   const renderObjects = (key: string, list: GameObject[]) => {
     const limit = shown[key] ?? PAGE;
     return (
@@ -58,6 +65,7 @@ export default function CategoryTree({ objects, edited, selectedId, onSelect }: 
               onClick={() => onSelect(obj.id)}
               title={obj.displayName}
             >
+              <ObjectIcon object={obj} />
               <span className="tree-name">{obj.displayName}</span>
               {obj.sourceFiles.some((f) => edited.has(f)) && <span className="tag">edited</span>}
               {obj.category !== obj.autoCategory && <span className="tag">moved</span>}
@@ -80,13 +88,17 @@ export default function CategoryTree({ objects, edited, selectedId, onSelect }: 
 
   return (
     <div className="tree">
-      <input
-        type="text"
-        className="tree-search"
-        placeholder="Search by name or kind"
-        value={filter}
-        onChange={(e) => setFilter(e.target.value)}
-      />
+      <label className="search-box">
+        <Search size={15} />
+        <input
+          ref={searchRef}
+          type="text"
+          placeholder="Search by name or kind…"
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+          onKeyDown={(e) => e.key === "Escape" && setFilter("")}
+        />
+      </label>
       <ul className="tree-categories">
         {categories.map((cat) => {
           const kinds = groups.get(cat.id);
@@ -102,7 +114,8 @@ export default function CategoryTree({ objects, edited, selectedId, onSelect }: 
                 disabled={count === 0}
                 title={cat.hint}
               >
-                <span className={expanded ? "chevron open" : "chevron"}>›</span>
+                {chevron(expanded)}
+                <CategoryIcon category={cat.id} />
                 <span className="tree-name">{cat.label}</span>
                 <span className="count">{count}</span>
               </button>
@@ -116,7 +129,7 @@ export default function CategoryTree({ objects, edited, selectedId, onSelect }: 
                       return (
                         <li key={kind}>
                           <button className="tree-row kind" onClick={() => toggle(key)}>
-                            <span className={isOpen(key) ? "chevron open" : "chevron"}>›</span>
+                            {chevron(isOpen(key))}
                             <span className="tree-name">{kind}</span>
                             <span className="count">{list.length}</span>
                           </button>

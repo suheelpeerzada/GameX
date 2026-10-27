@@ -1,11 +1,28 @@
-import { useCallback, useEffect, useState } from "react";
+import {
+  Gamepad2,
+  Hammer,
+  Moon,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Plus,
+  RefreshCw,
+  Search,
+  Settings,
+  Sparkles,
+  Sun,
+  Undo2,
+  X,
+} from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import AiPanel from "../components/AiPanel";
 import BuildDialog from "../components/BuildDialog";
 import CategoryTree from "../components/CategoryTree";
 import Inspector from "../components/Inspector";
-import { api, containerLabel, formatBytes } from "../lib/api";
+import { api, formatBytes } from "../lib/api";
 import { statusLabel } from "../lib/categories";
-import type { Category, EditState, GameProject, ImportRecord } from "../lib/types";
+import { currentTheme, setTheme, type Theme } from "../lib/theme";
+import type { AiStatus, Category, EditState, GameObject, GameProject, ImportRecord, ModelInfo } from "../lib/types";
+import { ObjectIcon, containerLongLabel } from "../lib/visuals";
 
 type Tab = "content" | "overview";
 
@@ -16,6 +33,7 @@ interface Props {
   /** Focus mode: the app sidebar and this project's tree are hidden. */
   focus: boolean;
   onToggleFocus: () => void;
+  onOpenSettings: () => void;
 }
 
 /** What the AI can read in a tab: the file shown and any selected text. */
@@ -24,7 +42,14 @@ interface TabContext {
   selection: string;
 }
 
-export default function ProjectScreen({ project, active: shown, focus, onToggleFocus }: Props) {
+/** The first word of a name: "player_walk.png" -> "player", "PlayerHud" -> "player". */
+function nameRoot(name: string): string | null {
+  const word = name.replace(/\.[^.]+$/, "").match(/[A-Za-z][a-z]*|[A-Z]+(?![a-z])/);
+  const root = word?.[0].toLowerCase() ?? null;
+  return root && root.length >= 3 ? root : null;
+}
+
+export default function ProjectScreen({ project, active: shown, focus, onToggleFocus, onOpenSettings }: Props) {
   const [analysis, setAnalysis] = useState<GameProject | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -33,19 +58,19 @@ export default function ProjectScreen({ project, active: shown, focus, onToggleF
   const [openTabs, setOpenTabs] = useState<string[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [contexts, setContexts] = useState<Record<string, TabContext>>({});
-  // Files the AI group has been used with, so each keeps its conversation.
-  const [aiFiles, setAiFiles] = useState<string[]>([]);
-  const [aiOpen, setAiOpen] = useState(false);
-  // Goes up each time the project comes back on screen, so the AI panel
-  // picks up a key or model changed in Settings meanwhile.
-  const [returns, setReturns] = useState(0);
-
-  useEffect(() => {
-    if (shown) setReturns((n) => n + 1);
-  }, [shown]);
   const [edits, setEdits] = useState<EditState>({ edited: [], undo: null });
   const [revision, setRevision] = useState(0);
   const [building, setBuilding] = useState(false);
+  const [icon, setIcon] = useState<string | null>(null);
+  const [theme, setThemeState] = useState<Theme>(currentTheme);
+  const searchRef = useRef<HTMLInputElement>(null);
+
+  // AI group
+  const [aiOpen, setAiOpen] = useState(true);
+  // Files the AI group has been used with, so each keeps its conversation.
+  const [aiFiles, setAiFiles] = useState<string[]>([]);
+  const [aiStatus, setAiStatus] = useState<AiStatus | null>(null);
+  const [models, setModels] = useState<ModelInfo[]>([]);
 
   const onEdited = (state: EditState) => {
     setEdits(state);
@@ -75,7 +100,33 @@ export default function ProjectScreen({ project, active: shown, focus, onToggleF
     setAiFiles([]);
     load(false);
     api.getEditState(project.id).then(setEdits).catch(console.error);
-  }, [load, project.id]);
+    if (project.container === "apk") {
+      api
+        .getBuildInfo(project.id)
+        .then((info) => setIcon(info.icon))
+        .catch(() => setIcon(null));
+    }
+  }, [load, project.id, project.container]);
+
+  // Pick up a key or model changed in Settings whenever the project comes back on screen.
+  useEffect(() => {
+    if (!shown) return;
+    api
+      .aiStatus()
+      .then((status) => {
+        setAiStatus(status);
+        if (status.provider) api.aiModels().then(setModels).catch(() => setModels([]));
+      })
+      .catch(() => setAiStatus(null));
+  }, [shown]);
+
+  const chooseModel = async (model: string) => {
+    try {
+      setAiStatus(await api.aiSetModel(model));
+    } catch (e) {
+      setError(String(e));
+    }
+  };
 
   const undo = async () => {
     try {
@@ -83,6 +134,18 @@ export default function ProjectScreen({ project, active: shown, focus, onToggleF
     } catch (e) {
       setError(`Couldn't undo: ${e}`);
     }
+  };
+
+  const toggleTheme = () => {
+    const next = theme === "dark" ? "light" : "dark";
+    setTheme(next);
+    setThemeState(next);
+  };
+
+  const focusSearch = () => {
+    setTab("content");
+    if (focus) onToggleFocus();
+    requestAnimationFrame(() => searchRef.current?.focus());
   };
 
   const move = async (objectId: string, category: Category | null) => {
@@ -105,9 +168,26 @@ export default function ProjectScreen({ project, active: shown, focus, onToggleF
     }
   };
 
+  const byId = useMemo(() => new Map((analysis?.objects ?? []).map((o) => [o.id, o])), [analysis]);
+  // Objects grouped by the first word of their name, for "Related Objects".
+  const byRoot = useMemo(() => {
+    const map = new Map<string, GameObject[]>();
+    for (const o of analysis?.objects ?? []) {
+      const root = nameRoot(o.displayName);
+      if (root) map.set(root, [...(map.get(root) ?? []), o]);
+    }
+    return map;
+  }, [analysis]);
+  const relatedTo = (o: GameObject) => {
+    const root = nameRoot(o.displayName);
+    return (root ? (byRoot.get(root) ?? []) : []).filter((r) => r.id !== o.id).slice(0, 8);
+  };
+
   const openObject = (id: string) => {
+    if (!byId.has(id)) return;
     setOpenTabs((tabs) => (tabs.includes(id) ? tabs : [...tabs, id]));
     setActiveId(id);
+    setTab("content");
   };
 
   const closeTab = (id: string) => {
@@ -118,46 +198,76 @@ export default function ProjectScreen({ project, active: shown, focus, onToggleF
   };
 
   const edited = new Set(edits.edited);
-  const tabObjects = openTabs
-    .map((id) => analysis?.objects.find((o) => o.id === id))
-    .filter((o): o is NonNullable<typeof o> => !!o);
-  const active = activeId ? contexts[activeId] : undefined;
-  const aiFile = active?.file ?? null;
+  const tabObjects = openTabs.map((id) => byId.get(id)).filter((o): o is GameObject => !!o);
+  const activeContext = activeId ? contexts[activeId] : undefined;
+  const aiFile = activeContext?.file ?? null;
 
   // The AI group follows the active tab's file.
   useEffect(() => {
     if (aiOpen && aiFile) setAiFiles((files) => (files.includes(aiFile) ? files : [...files, aiFile]));
   }, [aiOpen, aiFile]);
+
   const importedAt = new Date(project.importedAt * 1000).toLocaleString();
+  const analyzedAt = analysis ? new Date(analysis.analyzedAt * 1000).toLocaleString() : null;
 
   return (
     <div className="project">
       <header className="project-head">
-        <div>
-          <h1>{project.name}</h1>
-          <p className="muted">
-            {containerLabel[project.container]}
-            {analysis && <> · {analysis.engine.name}</>} · imported {importedAt}
-          </p>
+        <div className="project-identity">
+          <div className="project-avatar">{icon ? <img src={icon} alt="" /> : <Gamepad2 size={26} />}</div>
+          <div>
+            <div className="project-title">
+              <h1>{project.name}</h1>
+              {busy ? (
+                <span className="status-badge working">Analyzing…</span>
+              ) : analysis ? (
+                <span className="status-badge ok">Analyzed</span>
+              ) : null}
+            </div>
+            <p className="muted project-subtitle">
+              {containerLongLabel[project.container]}
+              {analysis && <span className="sep">•</span>}
+              {analysis?.engine.name}
+              <span className="sep">•</span>
+              Imported {importedAt}
+            </p>
+          </div>
         </div>
-        <div className="row">
-          <div className="tabs">
-            <button className={tab === "content" ? "tab active" : "tab"} onClick={() => setTab("content")}>
+        <div className="head-actions">
+          <div className="segmented">
+            <button className={tab === "content" ? "active" : ""} onClick={() => setTab("content")}>
               Content
             </button>
-            <button className={tab === "overview" ? "tab active" : "tab"} onClick={() => setTab("overview")}>
+            <button className={tab === "overview" ? "active" : ""} onClick={() => setTab("overview")}>
               Overview
             </button>
           </div>
-          <button onClick={() => load(true)} disabled={busy} title="Run the analyzer again. Your manual changes are kept.">
-            {busy ? "Analyzing…" : "Re-analyze"}
+          <button className="icon-button" onClick={focusSearch} title="Search objects">
+            <Search size={18} />
           </button>
-          <button onClick={undo} disabled={!edits.undo} title={edits.undo ? `Undo: ${edits.undo}` : "Nothing to undo"}>
-            Undo
+          <button
+            className="icon-button"
+            onClick={undo}
+            disabled={!edits.undo}
+            title={edits.undo ? `Undo: ${edits.undo}` : "Nothing to undo"}
+          >
+            <Undo2 size={18} />
+          </button>
+          <button
+            className="icon-button"
+            onClick={() => load(true)}
+            disabled={busy}
+            title="Analyze again (your manual changes are kept)"
+          >
+            <RefreshCw size={18} className={busy ? "spin" : undefined} />
+          </button>
+          <button className="icon-button" onClick={toggleTheme} title={theme === "dark" ? "Light theme" : "Dark theme"}>
+            {theme === "dark" ? <Sun size={18} /> : <Moon size={18} />}
           </button>
           {project.container === "apk" && (
-            <button className="primary" onClick={() => setBuilding(true)}>
-              Build APK…
+            <button className="primary build-button" onClick={() => setBuilding(true)}>
+              <Hammer size={16} />
+              Build APK
             </button>
           )}
         </div>
@@ -169,64 +279,67 @@ export default function ProjectScreen({ project, active: shown, focus, onToggleF
       )}
 
       {analysis ? (
-          // Kept mounted under Overview too, so open tabs keep their state.
-          <div className="browser" hidden={tab !== "content"}>
-            <aside className="tree-pane" hidden={focus}>
-              <CategoryTree
-                objects={analysis.objects}
-                edited={edited}
-                selectedId={activeId}
-                onSelect={openObject}
-              />
-            </aside>
-            <section className="editor-group">
-                <div className="tab-bar">
-                  <div className="editor-tools">
+        // Kept mounted under Overview too, so open tabs keep their state.
+        <div className="browser" hidden={tab !== "content"}>
+          <aside className="tree-pane" hidden={focus}>
+            <CategoryTree
+              objects={analysis.objects}
+              edited={edited}
+              selectedId={activeId}
+              onSelect={openObject}
+              searchRef={searchRef}
+            />
+          </aside>
+
+          <section className="editor-group">
+            <div className="tab-bar">
+              <button
+                className="tab-tool"
+                onClick={onToggleFocus}
+                title={focus ? "Show the side panels" : "Hide the side panels"}
+                aria-pressed={focus}
+              >
+                {focus ? <PanelLeftOpen size={16} /> : <PanelLeftClose size={16} />}
+              </button>
+              <div className="tabs-scroll" role="tablist">
+                {tabObjects.map((o) => (
+                  <div
+                    key={o.id}
+                    role="tab"
+                    aria-selected={o.id === activeId}
+                    className={o.id === activeId ? "editor-tab active" : "editor-tab"}
+                    title={`${o.displayName} (${o.kind})`}
+                    onClick={() => setActiveId(o.id)}
+                    onAuxClick={(e) => e.button === 1 && closeTab(o.id)}
+                  >
+                    <ObjectIcon object={o} />
+                    <span className="editor-tab-name">{o.displayName}</span>
+                    {o.sourceFiles.some((f) => edited.has(f)) && <span className="edited-dot" title="Edited" />}
                     <button
-                      className="tool-button"
-                      onClick={onToggleFocus}
-                      title={focus ? "Show the side panels" : "Hide the side panels"}
-                      aria-pressed={focus}
+                      className="editor-tab-close"
+                      aria-label={`Close ${o.displayName}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        closeTab(o.id);
+                      }}
                     >
-                      {focus ? "»" : "«"}
-                    </button>
-                    <button
-                      className={aiOpen ? "tool-button ai-toggle active" : "tool-button ai-toggle"}
-                      onClick={() => setAiOpen((o) => !o)}
-                      title={aiOpen ? "Close the AI group" : "Open the AI group beside the active file"}
-                      aria-pressed={aiOpen}
-                    >
-                      <span aria-hidden="true">✦</span> AI
+                      <X size={13} />
                     </button>
                   </div>
-                  <div className="tabs-scroll" role="tablist">
-                  {tabObjects.map((o) => (
-                    <div
-                      key={o.id}
-                      role="tab"
-                      aria-selected={o.id === activeId}
-                      className={o.id === activeId ? "editor-tab active" : "editor-tab"}
-                      title={`${o.displayName} (${o.kind})`}
-                      onClick={() => setActiveId(o.id)}
-                      onAuxClick={(e) => e.button === 1 && closeTab(o.id)}
-                    >
-                      <span className="editor-tab-name">{o.displayName}</span>
-                      {o.sourceFiles.some((f) => edited.has(f)) && <span className="edited-dot" title="Edited" />}
-                      <button
-                        className="editor-tab-close"
-                        aria-label={`Close ${o.displayName}`}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          closeTab(o.id);
-                        }}
-                      >
-                        ×
-                      </button>
-                    </div>
-                  ))}
-                  </div>
-                </div>
-              <div className="inspector-pane">
+                ))}
+              </div>
+              <button className="tab-tool" onClick={focusSearch} title="Open another object">
+                <Plus size={16} />
+              </button>
+              {!aiOpen && (
+                <button className="tab-tool ai-reopen" onClick={() => setAiOpen(true)} title="Open the AI Assistant">
+                  <Sparkles size={15} />
+                  <span>AI</span>
+                </button>
+              )}
+            </div>
+
+            <div className="inspector-pane">
               {tabObjects.map((o) => (
                 <div key={o.id} hidden={o.id !== activeId}>
                   <Inspector
@@ -234,6 +347,8 @@ export default function ProjectScreen({ project, active: shown, focus, onToggleF
                     object={o}
                     edited={edited}
                     revision={revision}
+                    related={relatedTo(o)}
+                    onOpen={openObject}
                     onMove={(c) => move(o.id, c)}
                     onEdited={onEdited}
                     onContext={(file, selection) =>
@@ -245,61 +360,97 @@ export default function ProjectScreen({ project, active: shown, focus, onToggleF
               {tabObjects.length === 0 && (
                 <div className="empty muted">
                   <p>
-                    {analysis.objects.length.toLocaleString()} objects. Pick one on the left to see what it is and
-                    preview it.
+                    {analysis.objects.length.toLocaleString()} objects. Pick one on the left to open it in a tab.
                   </p>
                   <p className="small">
-                    If something is in the wrong category, open it and change its category. Your change is kept
-                    when the game is analyzed again.
+                    Wrong category? Open the object and change it under Details; your change is kept when the game
+                    is analyzed again.
                   </p>
                   <p className="small">
-                    To change the game, open an object and edit or replace its files. Code is changed in each
-                    class's smali file. Originals are never touched, and Undo reverts your last change. When
-                    you're done, use Build APK.
-                  </p>
-                  <p className="small">
-                    For AI help, click ✦ AI at the top left of this panel: it opens beside the file you have
-                    open. « hides the side panels to give it more room.
+                    To change the game, edit or replace files under Code (code is changed in each class's smali).
+                    Originals are never touched, Undo reverts your last change, and Build APK makes the new game.
                   </p>
                 </div>
               )}
+            </div>
+
+            <footer className="status-bar">
+              <span className={busy ? "status-dot working" : error ? "status-dot bad" : "status-dot ok"} />
+              <span>{busy ? "Analyzing…" : error ? "Something went wrong" : "Analysis complete"}</span>
+              {edits.edited.length > 0 && (
+                <span className="muted">
+                  · {edits.edited.length} edited file{edits.edited.length === 1 ? "" : "s"}
+                </span>
+              )}
+              <span className="status-spacer" />
+              {analyzedAt && <span className="muted">Last updated: {analyzedAt}</span>}
+            </footer>
+          </section>
+
+          {aiOpen && (
+            <aside className="ai-group">
+              <div className="ai-group-head">
+                <Sparkles size={18} className="ai-mark" />
+                <span className="ai-group-title">AI Assistant</span>
+                {aiStatus?.provider && (
+                  <select
+                    className="model-select"
+                    value={aiStatus.model ?? ""}
+                    onChange={(e) => chooseModel(e.target.value)}
+                    title={aiStatus.providerLabel ?? undefined}
+                  >
+                    {!aiStatus.model && <option value="">Choose a model</option>}
+                    {aiStatus.model && !models.some((m) => m.id === aiStatus.model) && (
+                      <option value={aiStatus.model}>{aiStatus.model}</option>
+                    )}
+                    {models.map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.name}
+                      </option>
+                    ))}
+                  </select>
+                )}
+                <button className="icon-button small-icon" onClick={onOpenSettings} title="AI settings">
+                  <Settings size={16} />
+                </button>
+                <button className="icon-button small-icon" onClick={() => setAiOpen(false)} title="Close">
+                  <X size={16} />
+                </button>
               </div>
-            </section>
-            {aiOpen && (
-              <aside className="ai-group">
-                <div className="ai-group-head">
-                  <span>
-                    <span aria-hidden="true">✦</span> AI
-                  </span>
-                  <span className="muted small ai-group-file" title={aiFile ?? undefined}>
-                    {aiFile ? `Reading ${aiFile.split("/").pop()}` : "No file open"}
-                  </span>
-                  <button className="editor-tab-close" aria-label="Close the AI group" onClick={() => setAiOpen(false)}>
-                    ×
-                  </button>
-                </div>
-                <div className="ai-group-body">
-                  {!aiFile && (
-                    <p className="muted small">Open a file from the tree on the left. The AI reads the active tab.</p>
-                  )}
-                  {aiFiles.map((f) => (
+              <div className="ai-group-body">
+                {!aiFile && aiStatus?.configured && (
+                  <p className="muted small">Open an object from the tree. The assistant reads the active tab.</p>
+                )}
+                {(!aiStatus?.configured || !aiFile) && (
+                  <AiPanel
+                    projectId={project.id}
+                    path={null}
+                    selection=""
+                    status={aiStatus}
+                    onEdited={onEdited}
+                    onOpenSettings={onOpenSettings}
+                  />
+                )}
+                {aiStatus?.configured &&
+                  aiFiles.map((f) => (
                     <div key={f} hidden={f !== aiFile}>
                       <AiPanel
                         projectId={project.id}
                         path={f}
-                        selection={f === aiFile ? (active?.selection ?? "") : ""}
-                        refreshKey={returns}
+                        selection={f === aiFile ? (activeContext?.selection ?? "") : ""}
+                        status={aiStatus}
                         onEdited={onEdited}
+                        onOpenSettings={onOpenSettings}
                       />
                     </div>
                   ))}
-                </div>
-              </aside>
-            )}
-          </div>
-        ) : (
-          !error && tab === "content" && <div className="screen muted">Analyzing the game…</div>
-        )}
+              </div>
+            </aside>
+          )}
+        </div>
+      ) : (
+        !error && tab === "content" && <div className="screen muted">Analyzing the game…</div>
+      )}
 
       {tab === "overview" && (
         <div className="screen">

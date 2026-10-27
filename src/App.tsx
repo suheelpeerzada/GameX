@@ -1,7 +1,10 @@
+import { getVersion } from "@tauri-apps/api/app";
+import { ChevronRight, Download, Gamepad2, Info, Settings } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import logo from "./assets/logo.png";
-import { api, containerLabel, inDesktopApp } from "./lib/api";
+import { api, inDesktopApp } from "./lib/api";
 import type { ImportRecord } from "./lib/types";
+import { containerLongLabel } from "./lib/visuals";
 import AboutScreen from "./screens/AboutScreen";
 import ImportScreen from "./screens/ImportScreen";
 import ProjectScreen from "./screens/ProjectScreen";
@@ -12,6 +15,7 @@ type View = { kind: "import" } | { kind: "settings" } | { kind: "about" } | { ki
 export default function App() {
   const [view, setView] = useState<View>({ kind: "import" });
   const [projects, setProjects] = useState<ImportRecord[]>([]);
+  const [version, setVersion] = useState<string | null>(null);
   // Projects opened this session stay mounted (hidden when not shown), so
   // tabs, AI answers and unsaved edits survive a trip to Settings.
   const [opened, setOpened] = useState<string[]>([]);
@@ -31,8 +35,8 @@ export default function App() {
 
   useEffect(() => {
     refresh().catch(console.error);
+    if (inDesktopApp) getVersion().then(setVersion).catch(() => {});
   }, [refresh]);
-
 
   const remove = async (project: ImportRecord) => {
     const ok = window.confirm(
@@ -50,56 +54,64 @@ export default function App() {
     await refresh();
   };
 
+  const navButton = (kind: "import" | "settings", label: string, Icon: typeof Download) => (
+    <button className={view.kind === kind ? "nav active" : "nav"} onClick={() => setView({ kind })}>
+      <Icon size={18} />
+      <span>{label}</span>
+    </button>
+  );
+
   return (
     <div className="app">
       <aside className="sidebar" hidden={focus && view.kind === "project"}>
         <div className="brand">
           <img src={logo} alt="" className="brand-logo" />
-          GameX
+          <span>GameX</span>
         </div>
-        <nav>
-          <button
-            className={view.kind === "import" ? "nav active" : "nav"}
-            onClick={() => setView({ kind: "import" })}
-          >
-            Import a game
-          </button>
-          <button
-            className={view.kind === "settings" ? "nav active" : "nav"}
-            onClick={() => setView({ kind: "settings" })}
-          >
-            Settings
-          </button>
-          <button
-            className={view.kind === "about" ? "nav active" : "nav"}
-            onClick={() => setView({ kind: "about" })}
-          >
-            About
-          </button>
+        <nav className="main-nav">
+          {navButton("import", "Import", Download)}
+          {navButton("settings", "Settings", Settings)}
         </nav>
         <div className="section-label">Projects</div>
         <ul className="project-list">
           {projects.length === 0 && <li className="muted small">Nothing imported yet.</li>}
-          {projects.map((p) => (
-            <li key={p.id} className="project-item">
-              <button
-                className={view.kind === "project" && view.id === p.id ? "nav active" : "nav"}
-                onClick={() => setView({ kind: "project", id: p.id })}
-              >
-                <span className="project-name">{p.name}</span>
-                <span className="badge">{containerLabel[p.container]}</span>
-              </button>
-              <button
-                className="delete-project"
-                title={`Delete ${p.name}`}
-                aria-label={`Delete ${p.name}`}
-                onClick={() => remove(p)}
-              >
-                ×
-              </button>
-            </li>
-          ))}
+          {projects.map((p) => {
+            const active = view.kind === "project" && view.id === p.id;
+            return (
+              <li key={p.id} className="project-item">
+                <button
+                  className={active ? "project-card active" : "project-card"}
+                  onClick={() => setView({ kind: "project", id: p.id })}
+                >
+                  <span className="project-card-icon">
+                    <Gamepad2 size={20} />
+                  </span>
+                  <span className="project-card-text">
+                    <span className="project-name">{p.name}</span>
+                    <span className="project-kind">{containerLongLabel[p.container]}</span>
+                  </span>
+                  <ChevronRight size={16} className="project-card-chevron" />
+                </button>
+                <button
+                  className="delete-project"
+                  title={`Delete ${p.name}`}
+                  aria-label={`Delete ${p.name}`}
+                  onClick={() => remove(p)}
+                >
+                  ×
+                </button>
+              </li>
+            );
+          })}
         </ul>
+        <button
+          className={view.kind === "about" ? "sidebar-footer active" : "sidebar-footer"}
+          onClick={() => setView({ kind: "about" })}
+          title="About GameX"
+        >
+          <Info size={16} />
+          <span>{version ? `v${version}` : "About"}</span>
+        </button>
       </aside>
       <main className="content">
         {!inDesktopApp && (
@@ -129,6 +141,7 @@ export default function App() {
                   active={shown}
                   focus={focus}
                   onToggleFocus={() => setFocus((f) => !f)}
+                  onOpenSettings={() => setView({ kind: "settings" })}
                 />
               </div>
             );

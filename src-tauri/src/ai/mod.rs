@@ -143,11 +143,38 @@ fn current_model(data_dir: &Path) -> Result<(Provider, String, String), String> 
 // ---------------------------------------------------------------------------
 // Context: the file, its other form, and where it's used
 
-#[derive(Debug)]
-struct Reference {
-    class: String,
-    method: Option<String>,
-    line: String,
+#[derive(Debug, Serialize)]
+pub struct Reference {
+    /// The referring class, e.g. `com.game.World`.
+    pub class: String,
+    pub method: Option<String>,
+    pub line: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct References {
+    pub items: Vec<Reference>,
+    /// How many more were found than are listed.
+    pub more: usize,
+    /// False for files that aren't Java/smali classes.
+    pub supported: bool,
+}
+
+/// Where other classes use the class in `path` (a jadx Java or smali file).
+/// Needs no AI: it searches the smali GameX already has.
+pub fn references(project_root: &Path, path: &str) -> References {
+    match class_descriptor(path) {
+        Some(descriptor) => {
+            let (items, more) = find_references(project_root, &descriptor);
+            References { items, more, supported: true }
+        }
+        None => References {
+            items: Vec::new(),
+            more: 0,
+            supported: false,
+        },
+    }
 }
 
 struct FileContext {

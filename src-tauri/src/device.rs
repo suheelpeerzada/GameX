@@ -319,6 +319,35 @@ pub fn status(target: &str, package: &str) -> Result<GameStatus, String> {
     })
 }
 
+/// Makes a running game's Java debug port reachable on this PC (through adb)
+/// and returns (local port, process id).
+pub fn forward_jdwp(target: &str, package: &str) -> Result<(u16, u32), String> {
+    let adb = adb_for(target)?;
+    let pid: u32 = adb
+        .shell(&format!("pidof {package}"))?
+        .split_whitespace()
+        .next()
+        .and_then(|p| p.parse().ok())
+        .ok_or("The game isn't running. Start it with Run first.")?;
+    // Let the OS pick a free local port.
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .and_then(|l| l.local_addr())
+        .map_err(|e| e.to_string())?
+        .port();
+    let out = adb.run(&["forward", &format!("tcp:{port}"), &format!("jdwp:{pid}")])?;
+    if out.contains("error") {
+        return Err(format!("Couldn't reach the game's debug port: {out}"));
+    }
+    Ok((port, pid))
+}
+
+/// Removes a port forward made by `forward_jdwp`.
+pub fn unforward(target: &str, port: u16) {
+    if let Ok(adb) = adb_for(target) {
+        let _ = adb.run(&["forward", "--remove", &format!("tcp:{port}")]);
+    }
+}
+
 pub fn stop(target: &str, package: &str) -> Result<(), String> {
     adb_for(target)?.shell(&format!("am force-stop {package}")).map(|_| ())
 }

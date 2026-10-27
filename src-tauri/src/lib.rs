@@ -5,6 +5,8 @@ pub mod analyzer;
 mod commands;
 pub mod edits;
 pub mod import;
+pub mod jdwp;
+pub mod live;
 pub mod media;
 pub mod model;
 pub mod preview;
@@ -68,6 +70,12 @@ pub fn run() {
             commands::run_game,
             commands::run_status,
             commands::run_stop,
+            commands::live_attach,
+            commands::live_detach,
+            commands::live_counts,
+            commands::live_instances,
+            commands::live_object,
+            commands::live_set,
             commands::tool_install,
             commands::tool_uninstall,
             commands::tools_missing,

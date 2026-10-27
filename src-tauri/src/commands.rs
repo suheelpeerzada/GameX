@@ -21,6 +21,8 @@ pub struct AppState {
     data_dir: PathBuf,
     /// Games started from GameX, by project id.
     runs: Mutex<std::collections::HashMap<String, crate::device::Launched>>,
+    /// Live debug connections to running games, by project id.
+    lives: LiveSessions,
     workspace_root: PathBuf,
     signing_dir: PathBuf,
     settings_path: PathBuf,
@@ -34,6 +36,7 @@ impl AppState {
             workspace_root: data_dir.join("workspace"),
             data_dir: data_dir.clone(),
             runs: Mutex::new(std::collections::HashMap::new()),
+            lives: Default::default(),
             signing_dir: {
                 crate::toolbox::set_tools_dir(data_dir.join("tools"));
                 data_dir.join("signing")
@@ -553,6 +556,126 @@ pub async fn run_status(state: State<'_, AppState>, id: String) -> Result<Option
 pub async fn run_stop(state: State<'_, AppState>, id: String) -> Result<(), String> {
     let Some(launched) = state.runs.lock().unwrap().get(&id).cloned() else { return Ok(()) };
     tauri::async_runtime::spawn_blocking(move || crate::device::stop(&launched.target, &launched.package))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+// ---------------------------------------------------------------------------
+// Live editing of a running Java/Kotlin game
+
+type LiveSessions = std::sync::Arc<Mutex<std::collections::HashMap<String, (crate::live::LiveSession, u16)>>>;
+
+/// Runs `f` on the project's live connection. If the connection broke (the
+/// game stopped), it's dropped and the error says so.
+fn with_live<T>(
+    lives: &LiveSessions,
+    id: &str,
+    f: impl FnOnce(&mut crate::live::LiveSession) -> Result<T, String>,
+) -> Result<T, String> {
+    let mut map = lives.lock().unwrap();
+    let (session, _) = map.get_mut(id).ok_or("Not connected to the game. Connect first.")?;
+    let result = f(session);
+    if let Err(e) = &result {
+        let lost = ["connection", "broken pipe", "reset", "aborted", "timed out", "shutting down", "end of file", "short JDWP"]
+            .iter()
+            .any(|w| e.to_lowercase().contains(w));
+        if lost {
+            if let Some((s, port)) = map.remove(id) {
+                crate::device::unforward(&s.target, port);
+            }
+            return Err("The connection to the game was lost (it may have stopped or crashed). Start it again and reconnect.".into());
+        }
+    }
+    result
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiveInfo {
+    pid: u32,
+    package: String,
+    target: String,
+}
+
+/// Connects to the game started with Run (its Java debug interface).
+#[tauri::command]
+pub async fn live_attach(state: State<'_, AppState>, id: String) -> Result<LiveInfo, String> {
+    let launched = state.runs.lock().unwrap().get(&id).cloned().ok_or("Start the game with Run first.")?;
+    let lives = state.lives.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Some((mut old, port)) = lives.lock().unwrap().remove(&id) {
+            old.detach();
+            crate::device::unforward(&old.target, port);
+        }
+        let (port, pid) = crate::device::forward_jdwp(&launched.target, &launched.package)?;
+        let vm = crate::jdwp::Jdwp::connect(port).map_err(|e| {
+            crate::device::unforward(&launched.target, port);
+            format!(
+                "Couldn't connect to the game's Java debug interface ({e}). The emulator must allow debugging (LDPlayer does), or the APK must be built as debuggable."
+            )
+        })?;
+        let session = crate::live::LiveSession::new(vm, launched.target.clone(), launched.package.clone(), pid);
+        lives.lock().unwrap().insert(id, (session, port));
+        Ok(LiveInfo { pid, package: launched.package, target: launched.target })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub fn live_detach(state: State<'_, AppState>, id: String) {
+    if let Some((mut s, port)) = state.lives.lock().unwrap().remove(&id) {
+        s.detach();
+        crate::device::unforward(&s.target, port);
+    }
+}
+
+#[tauri::command]
+pub async fn live_counts(
+    state: State<'_, AppState>,
+    id: String,
+    classes: Vec<String>,
+) -> Result<Vec<crate::live::ClassCount>, String> {
+    let lives = state.lives.clone();
+    tauri::async_runtime::spawn_blocking(move || with_live(&lives, &id, |s| s.counts(&classes).map_err(|e| e.to_string())))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn live_instances(
+    state: State<'_, AppState>,
+    id: String,
+    class: String,
+) -> Result<Vec<crate::live::LiveInstance>, String> {
+    let lives = state.lives.clone();
+    tauri::async_runtime::spawn_blocking(move || with_live(&lives, &id, |s| s.instances(&class, 200).map_err(|e| e.to_string())))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn live_object(state: State<'_, AppState>, id: String, object: String) -> Result<crate::live::LiveObject, String> {
+    let object: u64 = object.parse().map_err(|_| "Invalid object.")?;
+    let lives = state.lives.clone();
+    tauri::async_runtime::spawn_blocking(move || with_live(&lives, &id, |s| s.object(object).map_err(|e| e.to_string())))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Changes one field of a live object; returns its new value as shown.
+#[tauri::command]
+pub async fn live_set(
+    state: State<'_, AppState>,
+    id: String,
+    object: String,
+    field: String,
+    value: String,
+) -> Result<String, String> {
+    let object: u64 = object.parse().map_err(|_| "Invalid object.")?;
+    let field: u64 = field.parse().map_err(|_| "Invalid field.")?;
+    let lives = state.lives.clone();
+    tauri::async_runtime::spawn_blocking(move || with_live(&lives, &id, |s| s.set(object, field, &value)))
         .await
         .map_err(|e| e.to_string())?
 }

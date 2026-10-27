@@ -20,6 +20,7 @@ import AiPanel from "../components/AiPanel";
 import BuildDialog from "../components/BuildDialog";
 import RunDialog from "../components/RunDialog";
 import CategoryTree from "../components/CategoryTree";
+import LiveView from "../components/LiveView";
 import Inspector from "../components/Inspector";
 import { api, formatBytes, pickPath } from "../lib/api";
 import { statusLabel } from "../lib/categories";
@@ -27,7 +28,7 @@ import { currentTheme, setTheme, type Theme } from "../lib/theme";
 import type { AiStatus, Category, EditState, GameObject, GameProject, ImportRecord, ModelInfo } from "../lib/types";
 import { ObjectIcon, containerLongLabel } from "../lib/visuals";
 
-type Tab = "content" | "overview";
+type Tab = "content" | "live" | "overview";
 
 interface Props {
   project: ImportRecord;
@@ -257,6 +258,11 @@ export default function ProjectScreen({ project, active: shown, focus, onToggleF
             <button className={tab === "content" ? "active" : ""} onClick={() => setTab("content")}>
               Content
             </button>
+            {project.container === "apk" && (
+              <button className={tab === "live" ? "active" : ""} onClick={() => setTab("live")}>
+                Live
+              </button>
+            )}
             <button className={tab === "overview" ? "active" : ""} onClick={() => setTab("overview")}>
               Overview
             </button>
@@ -501,6 +507,21 @@ export default function ProjectScreen({ project, active: shown, focus, onToggleF
         </div>
       ) : (
         !error && tab === "content" && <div className="screen muted">Analyzing the game…</div>
+      )}
+
+      {analysis && project.container === "apk" && (
+        // Kept mounted so the connection and selection survive tab switches.
+        <div className="live-host" hidden={tab !== "live"}>
+          <LiveView
+            projectId={project.id}
+            objects={analysis.objects}
+            onOpenObject={openObject}
+            onRun={() => {
+              setRunMounted(true);
+              setRunOpen(true);
+            }}
+          />
+        </div>
       )}
 
       {tab === "overview" && (

@@ -75,6 +75,35 @@ export interface RunStatus {
   status: GameStatus;
 }
 
+// Live editing (src-tauri/src/live.rs)
+
+export interface LiveClassCount {
+  class: string;
+  /** null when the class isn't loaded yet. */
+  count: number | null;
+}
+
+export interface LiveInstance {
+  id: string;
+  summary: string;
+}
+
+export interface LiveField {
+  fieldId: string;
+  name: string;
+  declaredIn: string;
+  typeName: string;
+  value: string;
+  editable: boolean;
+  isStatic: boolean;
+}
+
+export interface LiveObject {
+  id: string;
+  class: string;
+  fields: LiveField[];
+}
+
 /** An optional tool (src-tauri/src/toolbox.rs). */
 export interface ToolInfo {
   id: string;

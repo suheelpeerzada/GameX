@@ -11,6 +11,9 @@ import type {
   RunStatus,
   RunTarget,
   Launched,
+  LiveClassCount,
+  LiveInstance,
+  LiveObject,
   BuildOptions,
   BuildResult,
   Category,
@@ -90,6 +93,13 @@ export const api = {
     invoke<Launched>("run_game", { id, target, apk, replace }),
   runStatus: (id: string) => invoke<RunStatus | null>("run_status", { id }),
   runStop: (id: string) => invoke<void>("run_stop", { id }),
+  liveAttach: (id: string) => invoke<{ pid: number; package: string; target: string }>("live_attach", { id }),
+  liveDetach: (id: string) => invoke<void>("live_detach", { id }),
+  liveCounts: (id: string, classes: string[]) => invoke<LiveClassCount[]>("live_counts", { id, classes }),
+  liveInstances: (id: string, cls: string) => invoke<LiveInstance[]>("live_instances", { id, class: cls }),
+  liveObject: (id: string, object: string) => invoke<LiveObject>("live_object", { id, object }),
+  liveSet: (id: string, object: string, field: string, value: string) =>
+    invoke<string>("live_set", { id, object, field, value }),
   onRunProgress: (handler: (p: ImportProgress) => void): Promise<UnlistenFn> =>
     listen<ImportProgress>("run-progress", (e) => handler(e.payload)),
   toolInstall: (id: string) => invoke<ToolInfo>("tool_install", { id }),

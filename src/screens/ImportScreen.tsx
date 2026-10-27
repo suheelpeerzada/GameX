@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import ToolPrompt from "../components/ToolPrompt";
 import { api, inDesktopApp, pickPath, type PickKind } from "../lib/api";
 import type { ImportProgress, ImportRecord } from "../lib/types";
 
@@ -29,9 +30,18 @@ export default function ImportScreen({ onImported }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
   const busyRef = useRef(false);
+  // An APK waiting for tools the user is asked to install first.
+  const [needs, setNeeds] = useState<{ path: string; missing: string[] } | null>(null);
 
-  const run = async (path: string) => {
+  const run = async (path: string, checked = false) => {
     if (busyRef.current) return;
+    if (!checked && inDesktopApp && path.toLowerCase().endsWith(".apk")) {
+      const missing = await api.toolsMissing(["java", "apktool", "jadx"]);
+      if (missing.length > 0) {
+        setNeeds({ path, missing });
+        return;
+      }
+    }
     busyRef.current = true;
     setBusy(true);
     setError(null);
@@ -69,6 +79,24 @@ export default function ImportScreen({ onImported }: Props) {
 
   return (
     <div className="screen">
+      {needs && (
+        <ToolPrompt
+          missing={needs.missing}
+          action="Importing this APK"
+          without="the APK is only extracted: no decoded resources or readable code"
+          onReady={() => {
+            const path = needs.path;
+            setNeeds(null);
+            run(path, true);
+          }}
+          onSkip={() => {
+            const path = needs.path;
+            setNeeds(null);
+            run(path, true);
+          }}
+          onCancel={() => setNeeds(null)}
+        />
+      )}
       <h1>Import a game</h1>
       <p className="muted">
         Pick how the game is packaged, or drop it onto this window. GameX keeps the original

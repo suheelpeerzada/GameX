@@ -5,6 +5,8 @@ import type {
   AiStatus,
   Answer,
   BuildInfo,
+  ToolInfo,
+  ToolProgress,
   BuildOptions,
   BuildResult,
   Category,
@@ -76,6 +78,13 @@ export const api = {
   getSettings: () => invoke<Settings>("get_settings"),
   saveSettings: (settings: Settings) => invoke<void>("save_settings", { settings }),
   toolStatus: () => invoke<ToolStatus[]>("tool_status"),
+  toolsCatalog: () => invoke<ToolInfo[]>("tools_catalog"),
+  toolInstall: (id: string) => invoke<ToolInfo>("tool_install", { id }),
+  toolUninstall: (id: string) => invoke<void>("tool_uninstall", { id }),
+  /** Which of these tools aren't available anywhere. */
+  toolsMissing: (ids: string[]) => invoke<string[]>("tools_missing", { ids }),
+  onToolProgress: (handler: (p: ToolProgress) => void): Promise<UnlistenFn> =>
+    listen<ToolProgress>("tool-progress", (e) => handler(e.payload)),
   onImportProgress: (handler: (p: ImportProgress) => void): Promise<UnlistenFn> =>
     listen<ImportProgress>("import-progress", (e) => handler(e.payload)),
 };

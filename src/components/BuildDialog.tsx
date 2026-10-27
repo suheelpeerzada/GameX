@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, formatBytes, pickFile, pickSaveApk } from "../lib/api";
+import ToolPrompt from "./ToolPrompt";
 import type { BuildInfo, BuildResult } from "../lib/types";
 
 interface Props {
@@ -28,8 +29,12 @@ export default function BuildDialog({ projectId, editedCount, onClose }: Props) 
   const [iconPreview, setIconPreview] = useState<string | null>(null);
   const [removed, setRemoved] = useState<Set<string>>(new Set());
   const [stage, setStage] = useState<Stage>({ kind: "form" });
+  const [missingTools, setMissingTools] = useState<string[]>([]);
+  const [prompting, setPrompting] = useState(false);
+  const [reload, setReload] = useState(0);
 
   useEffect(() => {
+    api.toolsMissing(["java", "apktool", "uber-apk-signer"]).then(setMissingTools).catch(() => {});
     api
       .getBuildInfo(projectId)
       .then((i) => {
@@ -40,7 +45,7 @@ export default function BuildDialog({ projectId, editedCount, onClose }: Props) 
         setVersionCode(String(i.versionCode));
       })
       .catch((e) => setLoadError(String(e)));
-  }, [projectId]);
+  }, [projectId, reload]);
 
   const building = stage.kind === "building";
   // Esc closes the dialog, except while a build is running.
@@ -106,9 +111,25 @@ export default function BuildDialog({ projectId, editedCount, onClose }: Props) 
 
         {info && stage.kind === "form" && (
           <>
+            {prompting && (
+              <ToolPrompt
+                missing={missingTools}
+                action="Building an APK"
+                onReady={() => {
+                  setPrompting(false);
+                  setReload((r) => r + 1);
+                }}
+                onCancel={() => setPrompting(false)}
+              />
+            )}
             {info.problems.length > 0 && (
               <div className="panel error">
                 <h2>Can't build yet</h2>
+                {missingTools.length > 0 && (
+                  <button className="primary" onClick={() => setPrompting(true)}>
+                    Install the missing tools
+                  </button>
+                )}
                 <ul className="evidence">
                   {info.problems.map((p) => (
                     <li key={p}>{p}</li>

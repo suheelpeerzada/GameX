@@ -37,6 +37,28 @@ export interface ToolStatus {
   note: string;
 }
 
+/** An optional tool (src-tauri/src/toolbox.rs). */
+export interface ToolInfo {
+  id: string;
+  name: string;
+  description: string;
+  usedFor: string;
+  homepage: string;
+  size: string;
+  /** GameX downloads it (true), or it has its own installer (false). */
+  managed: boolean;
+  installed: boolean;
+  version: string | null;
+  path: string | null;
+  origin: "GameX" | "detected" | null;
+}
+
+export interface ToolProgress {
+  id: string;
+  received: number;
+  total: number | null;
+}
+
 export interface Settings {
   apktoolPath: string | null;
   jadxPath: string | null;

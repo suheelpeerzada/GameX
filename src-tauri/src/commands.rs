@@ -31,7 +31,10 @@ impl AppState {
         AppState {
             workspace_root: data_dir.join("workspace"),
             data_dir: data_dir.clone(),
-            signing_dir: data_dir.join("signing"),
+            signing_dir: {
+                crate::toolbox::set_tools_dir(data_dir.join("tools"));
+                data_dir.join("signing")
+            },
             settings: Mutex::new(Settings::load(&settings_path)),
             settings_path,
         }
@@ -436,6 +439,64 @@ pub async fn ai_propose(
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+// ---------------------------------------------------------------------------
+// Optional tools (Settings → Tools)
+
+#[tauri::command]
+pub fn tools_catalog() -> Vec<crate::toolbox::ToolInfo> {
+    crate::toolbox::catalog()
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ToolProgress {
+    id: String,
+    received: u64,
+    total: Option<u64>,
+}
+
+/// Downloads and installs one tool into GameX's tools folder.
+#[tauri::command]
+pub async fn tool_install(app: AppHandle, id: String) -> Result<crate::toolbox::ToolInfo, String> {
+    let spec = crate::toolbox::spec(&id).ok_or("Unknown tool.")?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut last = 0u64;
+        crate::toolbox::install(spec, |received, total| {
+            // About every 256 KB is plenty for a progress bar.
+            if received - last >= 256 << 10 || Some(received) == total {
+                last = received;
+                let _ = app.emit("tool-progress", ToolProgress { id: id.clone(), received, total });
+            }
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Which of these tools can't be found anywhere (a Settings path, GameX's
+/// own copy, PATH or JAVA_HOME), so the UI can offer to install them.
+#[tauri::command]
+pub fn tools_missing(state: State<'_, AppState>, ids: Vec<String>) -> Vec<String> {
+    let settings = state.settings();
+    ids.into_iter()
+        .filter(|id| {
+            let available = match id.as_str() {
+                "java" => tools::java_tool("java").is_some(),
+                "apktool" => tools::resolve(Tool::Apktool, &settings).is_some(),
+                "jadx" => tools::resolve(Tool::Jadx, &settings).is_some(),
+                "uber-apk-signer" => tools::resolve(Tool::Signer, &settings).is_some(),
+                other => crate::toolbox::spec(other).is_some_and(|s| crate::toolbox::info(s).installed),
+            };
+            !available
+        })
+        .collect()
+}
+
+#[tauri::command]
+pub fn tool_uninstall(id: String) -> Result<(), String> {
+    crate::toolbox::uninstall(&id)
 }
 
 #[tauri::command]

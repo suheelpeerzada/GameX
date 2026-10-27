@@ -9,6 +9,7 @@ pub mod preview;
 pub mod rebuild;
 pub mod scene;
 pub mod settings;
+pub mod toolbox;
 pub mod tools;
 pub mod workspace;
 
@@ -58,6 +59,10 @@ pub fn run() {
             commands::get_settings,
             commands::save_settings,
             commands::tool_status,
+            commands::tools_catalog,
+            commands::tool_install,
+            commands::tool_uninstall,
+            commands::tools_missing,
         ])
         .run(tauri::generate_context!())
         .expect("error while running GameX");

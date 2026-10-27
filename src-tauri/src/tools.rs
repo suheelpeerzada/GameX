@@ -42,26 +42,36 @@ pub struct ToolStatus {
     pub id: String,
     pub found: bool,
     pub path: Option<String>,
-    /// Where the path came from: "settings" or "PATH".
+    /// Where the path came from: "settings", "GameX" or "PATH".
     pub source: Option<String>,
     pub note: String,
 }
 
-/// Finds a tool: the path from settings if one is set, otherwise PATH.
+/// Finds a tool: the path from settings if one is set, then the copy GameX
+/// installed (Settings → Tools), then PATH.
 pub fn resolve(tool: Tool, settings: &Settings) -> Option<PathBuf> {
     match tool.configured(settings) {
         Some(p) => Some(PathBuf::from(p)).filter(|p| p.is_file()),
-        None if tool == Tool::Signer => find_jar_on_path(tool.id()),
-        None => find_on_path(tool.id()),
+        None => crate::toolbox::installed(tool.id()).or_else(|| {
+            if tool == Tool::Signer {
+                find_jar_on_path(tool.id())
+            } else {
+                find_on_path(tool.id())
+            }
+        }),
     }
 }
 
-/// `java` or `keytool` from JAVA_HOME, falling back to PATH.
+/// `java` or `keytool`: GameX's own Java runtime if installed, then
+/// JAVA_HOME, then PATH.
 pub fn java_tool(name: &str) -> Option<PathBuf> {
     let exe = if cfg!(windows) { format!("{name}.exe") } else { name.to_string() };
-    env::var_os("JAVA_HOME")
-        .map(|home| PathBuf::from(home).join("bin").join(&exe))
+    crate::toolbox::java_home()
+        .map(|home| home.join("bin").join(&exe))
         .filter(|p| p.is_file())
+        .or_else(|| env::var_os("JAVA_HOME")
+        .map(|home| PathBuf::from(home).join("bin").join(&exe))
+        .filter(|p| p.is_file()))
         .or_else(|| find_on_path(name))
 }
 
@@ -72,10 +82,11 @@ pub fn status(tool: Tool, settings: &Settings) -> ToolStatus {
         (Some(_), _) => "Ready.".to_string(),
         (None, Some(p)) => format!("No file at the configured path {p}."),
         (None, None) => format!(
-            "{} was not found on PATH. Install it or set its path in Settings.",
+            "{} isn't installed. Install it under Settings → Tools, or set its path here.",
             tool.id()
         ),
     };
+    let managed = crate::toolbox::installed(tool.id());
     ToolStatus {
         id: tool.id().to_string(),
         found: found.is_some(),
@@ -83,6 +94,8 @@ pub fn status(tool: Tool, settings: &Settings) -> ToolStatus {
         source: found.is_some().then(|| {
             if configured.is_some() {
                 "settings"
+            } else if managed.is_some() && managed == found {
+                "GameX"
             } else {
                 "PATH"
             }
@@ -124,8 +137,19 @@ fn find_jar_on_path(prefix: &str) -> Option<PathBuf> {
 
 /// Runs a tool and returns stderr (or stdout) on failure, trimmed for display.
 pub fn run(program: &Path, args: &[&std::ffi::OsStr]) -> Result<(), String> {
-    let output = Command::new(program)
-        .args(args)
+    let mut command = Command::new(program);
+    command.args(args);
+    // Tools started from .bat files (apktool, jadx) find Java through
+    // JAVA_HOME and PATH: point both at GameX's own runtime when installed.
+    if let Some(home) = crate::toolbox::java_home() {
+        let mut path = vec![home.join("bin")];
+        path.extend(env::split_paths(&env::var_os("PATH").unwrap_or_default()));
+        if let Ok(joined) = env::join_paths(path) {
+            command.env("PATH", joined);
+        }
+        command.env("JAVA_HOME", home);
+    }
+    let output = command
         .output()
         .map_err(|e| format!("Could not start {}: {e}", program.display()))?;
     if output.status.success() {

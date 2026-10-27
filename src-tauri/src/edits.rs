@@ -150,6 +150,21 @@ impl EditStore {
         self.write_edit(rel, text.as_bytes())
     }
 
+    /// Saves new contents for a binary file (a converted 3D model...). The
+    /// bytes must look like the file's format.
+    pub fn save_bytes(&self, rel: &str, bytes: &[u8], summary: String) -> io::Result<()> {
+        self.check_editable(rel)?;
+        if bytes.len() as u64 > MAX_REPLACEMENT {
+            return Err(invalid("That file is too large."));
+        }
+        let ext = extension(rel);
+        if !matches_magic(&ext, bytes) {
+            return Err(invalid(&format!("That isn't a valid .{ext} file.")));
+        }
+        self.record(rel, summary)?;
+        self.write_edit(rel, bytes)
+    }
+
     /// Replaces a file (an image, a sound...) with one the user picked. The
     /// new file must be the same format, since the game expects that format.
     pub fn replace(&self, rel: &str, source: &Path) -> io::Result<()> {
@@ -281,6 +296,11 @@ fn matches_magic(ext: &str, bytes: &[u8]) -> bool {
         "webp" => bytes.len() > 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP",
         "ogg" => bytes.starts_with(b"OggS"),
         "wav" => bytes.starts_with(b"RIFF"),
+        "glb" => bytes.starts_with(b"glTF"),
+        "gltf" => bytes.trim_ascii_start().starts_with(b"{"),
+        "ply" => bytes.starts_with(b"ply"),
+        "fbx" => bytes.starts_with(b"Kaydara FBX Binary") || !bytes.contains(&0),
+        "obj" | "dae" | "mtl" => !bytes.is_empty() && !bytes.contains(&0),
         _ => true,
     }
 }
@@ -337,6 +357,22 @@ mod tests {
         assert!(store.undo().unwrap());
         assert_eq!(read(&store, rel), "speed 1");
         assert!(!store.undo().unwrap());
+    }
+
+    #[test]
+    fn saves_checked_bytes_as_an_undoable_edit() {
+        let (dir, store) = setup();
+        let rel = "apktool/assets/hero.glb";
+        std::fs::create_dir_all(dir.path().join("unpacked/apktool/assets")).unwrap();
+        std::fs::write(dir.path().join("unpacked").join(rel), b"glTF old").unwrap();
+        assert!(store.save_bytes(rel, b"not a model", "x".into()).is_err());
+        store.save_bytes(rel, b"glTF new", "Replace hero.glb (from hero.fbx)".into()).unwrap();
+        assert_eq!(std::fs::read(store.current(rel).unwrap()).unwrap(), b"glTF new");
+        assert_eq!(std::fs::read(dir.path().join("unpacked").join(rel)).unwrap(), b"glTF old");
+        assert_eq!(store.state().unwrap().undo.as_deref(), Some("Replace hero.glb (from hero.fbx)"));
+        store.undo().unwrap();
+        assert_eq!(std::fs::read(store.current(rel).unwrap()).unwrap(), b"glTF old");
+        assert!(store.save_bytes("jadx/a.glb", b"glTF", "x".into()).is_err());
     }
 
     #[test]

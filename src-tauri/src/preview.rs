@@ -22,6 +22,8 @@ pub enum Preview {
     Text { text: String, truncated: bool, size: u64 },
     Binary { head: String, size: u64 },
     TooLarge { size: u64 },
+    /// A 3D model; the viewer reads the file itself.
+    Model { format: String, size: u64 },
 }
 
 fn media_type(ext: &str) -> Option<(&'static str, bool)> {
@@ -75,6 +77,12 @@ pub fn preview(project_root: &Path, rel: &str) -> io::Result<Preview> {
     let size = fs::metadata(&real)?.len();
     let ext = rel.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
 
+    if crate::models::is_model(rel) {
+        if size > crate::models::MAX_MODEL {
+            return Ok(Preview::TooLarge { size });
+        }
+        return Ok(Preview::Model { format: ext, size });
+    }
     if ext == "ctex" {
         let bytes = fs::read(&real)?;
         if let Some((mime, data)) = embedded_image(&bytes) {
@@ -164,12 +172,15 @@ mod tests {
         fs::write(unpacked.join("a/blob.bin"), [0u8, 1, 2, 255]).unwrap();
         fs::write(unpacked.join("a/x.png"), [137u8, 80, 78, 71]).unwrap();
         fs::write(dir.path().join("secret.txt"), "no").unwrap();
+        fs::write(unpacked.join("a/hero.obj"), "v 0 0 0").unwrap();
 
         let root = dir.path();
         assert!(matches!(preview(root, "a/notes.cfg").unwrap(), Preview::Text { ref text, .. } if text == "speed = 3"));
         assert!(matches!(preview(root, "a/blob.bin").unwrap(), Preview::Binary { size: 4, .. }));
         assert!(matches!(preview(root, "a/x.png").unwrap(), Preview::Image { ref data_url, .. } if data_url.starts_with("data:image/png;base64,")));
         assert!(preview(root, "../secret.txt").is_err());
+        // Models go to the 3D viewer, even text ones like OBJ.
+        assert!(matches!(preview(root, "a/hero.obj").unwrap(), Preview::Model { ref format, size: 7 } if format == "obj"));
         assert!(preview(root, "a/../../secret.txt").is_err());
         assert!(preview(root, &root.join("secret.txt").to_string_lossy()).is_err());
         assert!(read_text(root, "a/blob.bin").is_err());

@@ -236,7 +236,8 @@ export type Preview =
   | { type: "audio"; dataUrl: string; size: number }
   | { type: "text"; text: string; truncated: boolean; size: number }
   | { type: "binary"; head: string; size: number }
-  | { type: "tooLarge"; size: number };
+  | { type: "tooLarge"; size: number }
+  | { type: "model"; format: string; size: number };
 
 // Editing and building (src-tauri/src/edits.rs, rebuild.rs)
 

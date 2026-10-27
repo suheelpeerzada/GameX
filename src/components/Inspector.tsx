@@ -1,9 +1,10 @@
 import { ChevronDown, ChevronLeft, ChevronRight, ChevronUp } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { api, extensionOf, formatBytes, isEditablePath, mediaExtensions, pickFile } from "../lib/api";
 import { categories, categoryLabel } from "../lib/categories";
 import type { Category, EditState, GameObject, Preview, References } from "../lib/types";
 import { CategoryIcon, ObjectIcon, UNEDITABLE_FORMATS, fileType, isImagePath } from "../lib/visuals";
+import { isModelPath } from "../lib/models";
 import EmbeddedMedia from "./EmbeddedMedia";
 import SceneEditor from "./SceneEditor";
 
@@ -194,7 +195,13 @@ export default function Inspector(props: Props) {
               />
             ) : (
               <div ref={previewRef} onMouseUp={captureSelection} onKeyUp={captureSelection}>
-                <FilePreview key={`${file}:${revision}`} projectId={projectId} path={file} focusLine={focusLine} />
+                <FilePreview
+                  key={`${file}:${revision}`}
+                  projectId={projectId}
+                  path={file}
+                  focusLine={focusLine}
+                  onEdited={onEdited}
+                />
               </div>
             ))}
           {file && !editing && mightHoldMedia(file) && (
@@ -549,6 +556,22 @@ function FileActions(props: {
     );
   }
 
+  if (isModelPath(file)) {
+    // Replacing happens in the 3D view, which can convert and fit a model.
+    const text = TEXT_MODELS.has(extensionOf(file));
+    return (
+      <div className="row file-actions">
+        {text && <button onClick={props.onEdit}>Edit as text</button>}
+        {props.edited && (
+          <button onClick={props.onRevert} title="Go back to the game's original version (can be undone)">
+            Restore original
+          </button>
+        )}
+        <span className="muted small">Use Replace in the 3D view to swap in another model.</span>
+      </div>
+    );
+  }
+
   const media = mediaExtensions.has(extensionOf(file));
   return (
     <div className="row file-actions">
@@ -659,7 +682,23 @@ function TextEditor(props: {
   );
 }
 
-function FilePreview({ projectId, path, focusLine }: { projectId: string; path: string; focusLine?: number | null }) {
+/** Model formats that are plain text, so they can also be edited as text. */
+const TEXT_MODELS = new Set(["obj", "gltf", "dae"]);
+
+// three.js is large, so the 3D view loads only when a model is opened.
+const ModelView = lazy(() => import("./ModelView"));
+
+function FilePreview({
+  projectId,
+  path,
+  focusLine,
+  onEdited,
+}: {
+  projectId: string;
+  path: string;
+  focusLine?: number | null;
+  onEdited?: (state: EditState) => void;
+}) {
   const [preview, setPreview] = useState<Preview | null>(null);
   const [error, setError] = useState<string | null>(null);
   const preRef = useRef<HTMLPreElement>(null);
@@ -721,6 +760,19 @@ function FilePreview({ projectId, path, focusLine }: { projectId: string; path: 
       );
     case "tooLarge":
       return <div className="preview muted">Too large to preview ({formatBytes(preview.size)}).</div>;
+    case "model":
+      return (
+        <Suspense fallback={<div className="preview muted">Starting the 3D view…</div>}>
+          <ModelView
+            projectId={projectId}
+            path={path}
+            format={preview.format}
+            size={preview.size}
+            editable={isEditablePath(path)}
+            onEdited={onEdited}
+          />
+        </Suspense>
+      );
   }
 }
 

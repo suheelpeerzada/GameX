@@ -1,6 +1,7 @@
 import {
   AppWindow,
   AudioLines,
+  Box,
   CircleQuestionMark,
   CodeXml,
   Cpu,
@@ -15,6 +16,7 @@ import {
   Users,
   type LucideIcon,
 } from "lucide-react";
+import { MODEL_FORMATS } from "./models";
 import type { Category, ContainerKind, GameObject } from "./types";
 
 /** Icon and color for each category, used in the tree and the inspector. */
@@ -53,6 +55,7 @@ export function fileType(path: string): { label: string; Icon: LucideIcon } {
   if (["oggvorbisstr", "sample", "mp3str"].includes(ext)) return { label: "Godot audio", Icon: FileMusic };
   if (ext === "gdc") return { label: "Compiled script", Icon: FileCode };
   if (ext === "scn") return { label: "Scene", Icon: File };
+  if (MODEL_FORMATS.includes(ext)) return { label: "3D model", Icon: Box };
   if (AUDIO.includes(ext)) return { label: "Audio", Icon: FileMusic };
   if (ext === "java") return { label: "Java", Icon: FileCode };
   if (ext === "smali") return { label: "Smali", Icon: FileCode };

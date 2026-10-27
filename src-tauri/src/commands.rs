@@ -221,6 +221,76 @@ pub fn undo_edit(state: State<'_, AppState>, id: String) -> Result<EditState, St
     edit_and_report(&state, &id, |s| s.undo().map(|_| ()))
 }
 
+/// A game file's bytes (the edited version if there is one), for the 3D viewer.
+#[tauri::command]
+pub fn read_bytes(state: State<'_, AppState>, id: String, path: String) -> Result<tauri::ipc::Response, String> {
+    let dir = state.workspace().project_dir(&id).map_err(|e| e.to_string())?;
+    let real = preview::resolve(&dir, &path).map_err(|e| e.to_string())?;
+    read_limited(&real)
+}
+
+fn read_limited(path: &std::path::Path) -> Result<tauri::ipc::Response, String> {
+    let size = std::fs::metadata(path).map_err(|e| e.to_string())?.len();
+    if size > crate::models::MAX_MODEL {
+        return Err("This file is too large to open here.".into());
+    }
+    std::fs::read(path).map(tauri::ipc::Response::new).map_err(|e| e.to_string())
+}
+
+/// Materials and textures next to a game's model, as paths in the project.
+#[tauri::command]
+pub fn model_aux(state: State<'_, AppState>, id: String, path: String) -> Result<Vec<String>, String> {
+    let dir = state.workspace().project_dir(&id).map_err(|e| e.to_string())?;
+    preview::resolve(&dir, &path).map_err(|e| e.to_string())?;
+    let unpacked = dir.join("unpacked");
+    let folder = unpacked.join(&path);
+    let folder = folder.parent().ok_or("Invalid file path.")?;
+    Ok(crate::models::aux_files(folder)
+        .iter()
+        .filter_map(|p| p.strip_prefix(&unpacked).ok())
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .collect())
+}
+
+/// A model the user picked to replace one with, and the files next to it.
+#[tauri::command]
+pub fn read_local_bytes(path: String) -> Result<tauri::ipc::Response, String> {
+    read_limited(std::path::Path::new(&path))
+}
+
+#[tauri::command]
+pub fn local_model_aux(path: String) -> Result<Vec<String>, String> {
+    let folder = std::path::Path::new(&path).parent().ok_or("Invalid file path.")?;
+    Ok(crate::models::aux_files(folder).iter().map(|p| p.to_string_lossy().into_owned()).collect())
+}
+
+/// Saves new bytes for a game file (a converted model). The bytes are the
+/// request body; the project, path and history label come in headers
+/// (`%`-escaped), since a JSON array of bytes would be slow.
+#[tauri::command]
+pub fn save_file_bytes(state: State<'_, AppState>, request: tauri::ipc::Request<'_>) -> Result<EditState, String> {
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
+        return Err("Expected the file's bytes.".into());
+    };
+    let header = |name: &str| -> Result<String, String> {
+        let value = request.headers().get(name).ok_or(format!("Missing {name}."))?;
+        crate::models::percent_decode(value.to_str().map_err(|e| e.to_string())?)
+    };
+    let (id, path, summary) = (header("gamex-project")?, header("gamex-path")?, header("gamex-summary")?);
+    edit_and_report(&state, &id, |s| s.save_bytes(&path, bytes, summary))
+}
+
+/// Writes bytes to a file the user picked in a save dialog (an exported model).
+#[tauri::command]
+pub fn save_local_bytes(request: tauri::ipc::Request<'_>) -> Result<(), String> {
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
+        return Err("Expected the file's bytes.".into());
+    };
+    let path = request.headers().get("gamex-path").ok_or("Missing the file path.")?;
+    let path = crate::models::percent_decode(path.to_str().map_err(|e| e.to_string())?)?;
+    std::fs::write(&path, bytes).map_err(|e| format!("Couldn't save {path}: {e}"))
+}
+
 /// Current name, package, version, icon and permissions for the build dialog.
 #[tauri::command]
 pub fn get_build_info(state: State<'_, AppState>, id: String) -> Result<BuildInfo, String> {

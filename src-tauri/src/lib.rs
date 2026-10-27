@@ -10,6 +10,7 @@ pub mod keep;
 pub mod live;
 pub mod media;
 pub mod mirror;
+pub mod models;
 pub mod model;
 pub mod preview;
 pub mod rebuild;
@@ -43,6 +44,12 @@ pub fn run() {
             commands::get_edit_state,
             commands::save_text_file,
             commands::replace_file,
+            commands::read_bytes,
+            commands::model_aux,
+            commands::read_local_bytes,
+            commands::local_model_aux,
+            commands::save_file_bytes,
+            commands::save_local_bytes,
             commands::revert_file,
             commands::undo_edit,
             commands::get_build_info,

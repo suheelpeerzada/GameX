@@ -57,6 +57,24 @@ export const api = {
     invoke<EditState>("save_text_file", { id, path, text }),
   replaceFile: (id: string, path: string, source: string) =>
     invoke<EditState>("replace_file", { id, path, source }),
+  /** A game file's bytes (the edited version if any), for the 3D viewer. */
+  readBytes: (id: string, path: string) => invoke<ArrayBuffer>("read_bytes", { id, path }),
+  /** Materials and textures next to a game's model. */
+  modelAux: (id: string, path: string) => invoke<string[]>("model_aux", { id, path }),
+  readLocalBytes: (path: string) => invoke<ArrayBuffer>("read_local_bytes", { path }),
+  localModelAux: (path: string) => invoke<string[]>("local_model_aux", { path }),
+  /** Saves new bytes for a game file as an undoable edit labeled `summary`. */
+  saveFileBytes: (id: string, path: string, bytes: Uint8Array, summary: string) =>
+    invoke<EditState>("save_file_bytes", bytes, {
+      headers: {
+        "gamex-project": encodeURIComponent(id),
+        "gamex-path": encodeURIComponent(path),
+        "gamex-summary": encodeURIComponent(summary),
+      },
+    }),
+  /** Writes a file the user chose a place for (an exported model). */
+  saveLocalBytes: (path: string, bytes: Uint8Array) =>
+    invoke<void>("save_local_bytes", bytes, { headers: { "gamex-path": encodeURIComponent(path) } }),
   revertFile: (id: string, path: string) => invoke<EditState>("revert_file", { id, path }),
   undoEdit: (id: string) => invoke<EditState>("undo_edit", { id }),
   getBuildInfo: (id: string) => invoke<BuildInfo>("get_build_info", { id }),

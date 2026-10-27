@@ -1107,3 +1107,8 @@ pre.code { line-height: 1.5; }
 .tool-path { display: flex; flex-direction: column; gap: 4px; margin-top: 4px; }
 .tool-more { flex-wrap: wrap; margin-top: 2px; }
 .tool-more button { display: flex; align-items: center; gap: 6px; }
+
+.tool-row { cursor: pointer; padding: 2px 0; }
+.tool-status { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+.tool-expand { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 6px; color: var(--muted); }
+.tool-row:hover .tool-expand { color: var(--text); background: var(--border); }

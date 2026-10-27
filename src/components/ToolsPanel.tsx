@@ -119,17 +119,16 @@ export default function ToolsPanel({ onChanged }: { onChanged?: () => void }) {
           const pathKey = PATH_KEYS[tool.id];
           return (
             <li key={tool.id} className="tool-card">
-              <div className="tool-row">
-                <div className="tool-title">
-                  <strong>{tool.name}</strong>
-                  <button
-                    className="tool-expand"
-                    onClick={() => toggle(tool.id)}
-                    aria-expanded={open}
-                    title={open ? "Hide details" : "Show details"}
-                  >
-                    {open ? <ChevronUp size={15} /> : <ChevronDown size={15} />}
-                  </button>
+              <div
+                className="tool-row"
+                role="button"
+                tabIndex={0}
+                aria-expanded={open}
+                onClick={() => toggle(tool.id)}
+                onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && (e.preventDefault(), toggle(tool.id))}
+              >
+                <strong>{tool.name}</strong>
+                <div className="tool-status">
                   {tool.installed ? (
                     <span className="pill ok">
                       <CheckCircle2 size={11} />{" "}
@@ -142,24 +141,9 @@ export default function ToolsPanel({ onChanged }: { onChanged?: () => void }) {
                   ) : (
                     <span className="pill muted-pill">not installed</span>
                   )}
-                </div>
-                <div className="tool-actions">
-                  {tool.managed && (!tool.installed || tool.origin === "GameX") && (
-                    <button
-                      className={tool.installed ? "" : "primary"}
-                      disabled={!inDesktopApp || busy[tool.id]}
-                      onClick={() => install(tool)}
-                    >
-                      {tool.installed ? <RefreshCw size={14} /> : <Download size={14} />}
-                      {busy[tool.id] ? "Working…" : tool.installed ? "Update" : "Install"}
-                    </button>
-                  )}
-                  {!tool.managed && !tool.installed && (
-                    <button className="primary" onClick={() => openUrl(tool.homepage).catch(() => {})}>
-                      <ExternalLink size={14} />
-                      Get it
-                    </button>
-                  )}
+                  <span className="tool-expand" title={open ? "Hide details" : "Show details"}>
+                    {open ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+                  </span>
                 </div>
               </div>
               {busy[tool.id] && tool.managed && <ProgressBar progress={progress[tool.id]} />}
@@ -212,6 +196,22 @@ export default function ToolsPanel({ onChanged }: { onChanged?: () => void }) {
                     </div>
                   )}
                   <div className="row tool-more">
+                    {tool.managed && (!tool.installed || tool.origin === "GameX") && (
+                      <button
+                        className={tool.installed ? "" : "primary"}
+                        disabled={!inDesktopApp || busy[tool.id]}
+                        onClick={() => install(tool)}
+                      >
+                        {tool.installed ? <RefreshCw size={14} /> : <Download size={14} />}
+                        {busy[tool.id] ? "Working…" : tool.installed ? "Update" : `Install (${tool.size})`}
+                      </button>
+                    )}
+                    {!tool.managed && !tool.installed && (
+                      <button className="primary" onClick={() => openUrl(tool.homepage).catch(() => {})}>
+                        <ExternalLink size={14} />
+                        Get it
+                      </button>
+                    )}
                     {tool.managed && tool.installed && tool.origin !== "GameX" && (
                       <button disabled={busy[tool.id]} onClick={() => install(tool)}>
                         <Download size={14} />

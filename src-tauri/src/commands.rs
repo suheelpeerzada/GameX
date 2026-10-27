@@ -6,6 +6,7 @@ use std::sync::Mutex;
 
 use tauri::{AppHandle, Emitter, State};
 
+use crate::ai::{self, providers::ModelInfo, AiStatus, Answer, Explanation, Proposal, ValueChange};
 use crate::analyzer;
 use crate::edits::{EditState, EditStore};
 use crate::import;
@@ -17,6 +18,7 @@ use crate::tools::{self, Tool, ToolStatus};
 use crate::workspace::Workspace;
 
 pub struct AppState {
+    data_dir: PathBuf,
     workspace_root: PathBuf,
     signing_dir: PathBuf,
     settings_path: PathBuf,
@@ -28,6 +30,7 @@ impl AppState {
         let settings_path = data_dir.join("settings.json");
         AppState {
             workspace_root: data_dir.join("workspace"),
+            data_dir: data_dir.clone(),
             signing_dir: data_dir.join("signing"),
             settings: Mutex::new(Settings::load(&settings_path)),
             settings_path,
@@ -255,6 +258,99 @@ pub fn read_png(path: String) -> Result<String, String> {
         "data:image/png;base64,{}",
         base64::engine::general_purpose::STANDARD.encode(bytes)
     ))
+}
+
+// ---------------------------------------------------------------------------
+// AI assistant (optional)
+
+#[tauri::command]
+pub fn ai_status(state: State<'_, AppState>) -> AiStatus {
+    ai::status(&state.data_dir)
+}
+
+#[derive(serde::Serialize)]
+pub struct AiKeyResult {
+    status: AiStatus,
+    models: Vec<ModelInfo>,
+}
+
+/// Checks a key with its provider, then stores it in the credential store.
+#[tauri::command]
+pub async fn ai_set_key(state: State<'_, AppState>, key: String) -> Result<AiKeyResult, String> {
+    let data_dir = state.data_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        ai::set_key(&data_dir, &key).map(|(status, models)| AiKeyResult { status, models })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn ai_models() -> Result<Vec<ModelInfo>, String> {
+    tauri::async_runtime::spawn_blocking(ai::models)
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub fn ai_set_model(state: State<'_, AppState>, model: String) -> Result<AiStatus, String> {
+    ai::set_model(&state.data_dir, &model)
+}
+
+#[tauri::command]
+pub fn ai_clear_key(state: State<'_, AppState>) -> Result<AiStatus, String> {
+    ai::clear(&state.data_dir)
+}
+
+#[tauri::command]
+pub async fn ai_explain(
+    state: State<'_, AppState>,
+    id: String,
+    path: String,
+    selection: Option<String>,
+) -> Result<Explanation, String> {
+    let data_dir = state.data_dir.clone();
+    let project = state.workspace().project_dir(&id).map_err(|e| e.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || ai::explain(&data_dir, &project, &path, selection.as_deref()))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn ai_ask(
+    state: State<'_, AppState>,
+    id: String,
+    path: String,
+    selection: Option<String>,
+    question: String,
+) -> Result<Answer, String> {
+    let data_dir = state.data_dir.clone();
+    let project = state.workspace().project_dir(&id).map_err(|e| e.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        ai::ask(&data_dir, &project, &path, selection.as_deref(), &question)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Asks the AI for edits. Nothing is saved: the UI shows the proposal and
+/// saves it through `save_text_file` only if the user approves.
+#[tauri::command]
+pub async fn ai_propose(
+    state: State<'_, AppState>,
+    id: String,
+    path: String,
+    selection: Option<String>,
+    changes: Vec<ValueChange>,
+    instruction: String,
+) -> Result<Proposal, String> {
+    let data_dir = state.data_dir.clone();
+    let project = state.workspace().project_dir(&id).map_err(|e| e.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        ai::propose(&data_dir, &project, &path, selection.as_deref(), &changes, &instruction)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]

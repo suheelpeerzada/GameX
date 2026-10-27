@@ -148,3 +148,80 @@ export interface BuildResult {
   package: string;
   editedFiles: number;
 }
+
+// AI assistant (src-tauri/src/ai/)
+
+export type AiProvider = "anthropic" | "openai" | "openrouter" | "gemini" | "groq";
+
+export interface AiStatus {
+  configured: boolean;
+  provider: AiProvider | null;
+  providerLabel: string | null;
+  model: string | null;
+  keyHint: string | null;
+}
+
+export interface ModelInfo {
+  id: string;
+  name: string;
+}
+
+export interface TokenUsage {
+  input: number;
+  output: number;
+}
+
+export interface UsageNote {
+  where: string;
+  how: string;
+}
+
+export interface TunableValue {
+  id: string;
+  name: string;
+  description: string;
+  current: string;
+  type: "integer" | "decimal" | "boolean" | "text";
+}
+
+export interface Explanation {
+  summary: string;
+  explanation: string;
+  usage: UsageNote[];
+  values: TunableValue[];
+  editTarget: string | null;
+  tokens: TokenUsage;
+  model: string;
+  trimmed: string | null;
+}
+
+export interface Answer {
+  answer: string;
+  tokens: TokenUsage;
+  model: string;
+  trimmed: string | null;
+}
+
+export interface ValueChange {
+  id: string;
+  name: string;
+  current: string;
+  newValue: string;
+}
+
+export interface TextEdit {
+  find: string;
+  replace: string;
+}
+
+export interface Proposal {
+  summary: string;
+  notes: string;
+  target: string;
+  original: string;
+  updated: string;
+  edits: TextEdit[];
+  tokens: TokenUsage;
+  model: string;
+  trimmed: string | null;
+}

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import AiPanel from "../components/AiPanel";
 import BuildDialog from "../components/BuildDialog";
 import CategoryTree from "../components/CategoryTree";
 import Inspector from "../components/Inspector";
@@ -8,12 +9,40 @@ import type { Category, EditState, GameProject, ImportRecord } from "../lib/type
 
 type Tab = "content" | "overview";
 
-export default function ProjectScreen({ project }: { project: ImportRecord }) {
+interface Props {
+  project: ImportRecord;
+  /** True while this project is the one on screen. */
+  active: boolean;
+  /** Focus mode: the app sidebar and this project's tree are hidden. */
+  focus: boolean;
+  onToggleFocus: () => void;
+}
+
+/** What the AI can read in a tab: the file shown and any selected text. */
+interface TabContext {
+  file: string | null;
+  selection: string;
+}
+
+export default function ProjectScreen({ project, active: shown, focus, onToggleFocus }: Props) {
   const [analysis, setAnalysis] = useState<GameProject | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [tab, setTab] = useState<Tab>("content");
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  // Open objects, like editor tabs: each keeps its state while in the background.
+  const [openTabs, setOpenTabs] = useState<string[]>([]);
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const [contexts, setContexts] = useState<Record<string, TabContext>>({});
+  // Files the AI group has been used with, so each keeps its conversation.
+  const [aiFiles, setAiFiles] = useState<string[]>([]);
+  const [aiOpen, setAiOpen] = useState(false);
+  // Goes up each time the project comes back on screen, so the AI panel
+  // picks up a key or model changed in Settings meanwhile.
+  const [returns, setReturns] = useState(0);
+
+  useEffect(() => {
+    if (shown) setReturns((n) => n + 1);
+  }, [shown]);
   const [edits, setEdits] = useState<EditState>({ edited: [], undo: null });
   const [revision, setRevision] = useState(0);
   const [building, setBuilding] = useState(false);
@@ -40,7 +69,10 @@ export default function ProjectScreen({ project }: { project: ImportRecord }) {
 
   useEffect(() => {
     setAnalysis(null);
-    setSelectedId(null);
+    setOpenTabs([]);
+    setActiveId(null);
+    setContexts({});
+    setAiFiles([]);
     load(false);
     api.getEditState(project.id).then(setEdits).catch(console.error);
   }, [load, project.id]);
@@ -73,8 +105,29 @@ export default function ProjectScreen({ project }: { project: ImportRecord }) {
     }
   };
 
-  const selected = analysis?.objects.find((o) => o.id === selectedId) ?? null;
+  const openObject = (id: string) => {
+    setOpenTabs((tabs) => (tabs.includes(id) ? tabs : [...tabs, id]));
+    setActiveId(id);
+  };
+
+  const closeTab = (id: string) => {
+    const index = openTabs.indexOf(id);
+    const rest = openTabs.filter((t) => t !== id);
+    setOpenTabs(rest);
+    if (activeId === id) setActiveId(rest[Math.min(index, rest.length - 1)] ?? null);
+  };
+
   const edited = new Set(edits.edited);
+  const tabObjects = openTabs
+    .map((id) => analysis?.objects.find((o) => o.id === id))
+    .filter((o): o is NonNullable<typeof o> => !!o);
+  const active = activeId ? contexts[activeId] : undefined;
+  const aiFile = active?.file ?? null;
+
+  // The AI group follows the active tab's file.
+  useEffect(() => {
+    if (aiOpen && aiFile) setAiFiles((files) => (files.includes(aiFile) ? files : [...files, aiFile]));
+  }, [aiOpen, aiFile]);
   const importedAt = new Date(project.importedAt * 1000).toLocaleString();
 
   return (
@@ -115,29 +168,81 @@ export default function ProjectScreen({ project }: { project: ImportRecord }) {
         <BuildDialog projectId={project.id} editedCount={edits.edited.length} onClose={() => setBuilding(false)} />
       )}
 
-      {tab === "content" &&
-        (analysis ? (
-          <div className="browser">
-            <aside className="tree-pane">
+      {analysis ? (
+          // Kept mounted under Overview too, so open tabs keep their state.
+          <div className="browser" hidden={tab !== "content"}>
+            <aside className="tree-pane" hidden={focus}>
               <CategoryTree
                 objects={analysis.objects}
                 edited={edited}
-                selectedId={selectedId}
-                onSelect={setSelectedId}
+                selectedId={activeId}
+                onSelect={openObject}
               />
             </aside>
-            <section className="inspector-pane">
-              {selected ? (
-                <Inspector
-                  key={selected.id}
-                  projectId={project.id}
-                  object={selected}
-                  edited={edited}
-                  revision={revision}
-                  onMove={(c) => move(selected.id, c)}
-                  onEdited={onEdited}
-                />
-              ) : (
+            <section className="editor-group">
+                <div className="tab-bar">
+                  <div className="editor-tools">
+                    <button
+                      className="tool-button"
+                      onClick={onToggleFocus}
+                      title={focus ? "Show the side panels" : "Hide the side panels"}
+                      aria-pressed={focus}
+                    >
+                      {focus ? "»" : "«"}
+                    </button>
+                    <button
+                      className={aiOpen ? "tool-button ai-toggle active" : "tool-button ai-toggle"}
+                      onClick={() => setAiOpen((o) => !o)}
+                      title={aiOpen ? "Close the AI group" : "Open the AI group beside the active file"}
+                      aria-pressed={aiOpen}
+                    >
+                      <span aria-hidden="true">✦</span> AI
+                    </button>
+                  </div>
+                  <div className="tabs-scroll" role="tablist">
+                  {tabObjects.map((o) => (
+                    <div
+                      key={o.id}
+                      role="tab"
+                      aria-selected={o.id === activeId}
+                      className={o.id === activeId ? "editor-tab active" : "editor-tab"}
+                      title={`${o.displayName} (${o.kind})`}
+                      onClick={() => setActiveId(o.id)}
+                      onAuxClick={(e) => e.button === 1 && closeTab(o.id)}
+                    >
+                      <span className="editor-tab-name">{o.displayName}</span>
+                      {o.sourceFiles.some((f) => edited.has(f)) && <span className="edited-dot" title="Edited" />}
+                      <button
+                        className="editor-tab-close"
+                        aria-label={`Close ${o.displayName}`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          closeTab(o.id);
+                        }}
+                      >
+                        ×
+                      </button>
+                    </div>
+                  ))}
+                  </div>
+                </div>
+              <div className="inspector-pane">
+              {tabObjects.map((o) => (
+                <div key={o.id} hidden={o.id !== activeId}>
+                  <Inspector
+                    projectId={project.id}
+                    object={o}
+                    edited={edited}
+                    revision={revision}
+                    onMove={(c) => move(o.id, c)}
+                    onEdited={onEdited}
+                    onContext={(file, selection) =>
+                      setContexts((c) => ({ ...c, [o.id]: { file, selection } }))
+                    }
+                  />
+                </div>
+              ))}
+              {tabObjects.length === 0 && (
                 <div className="empty muted">
                   <p>
                     {analysis.objects.length.toLocaleString()} objects. Pick one on the left to see what it is and
@@ -152,13 +257,49 @@ export default function ProjectScreen({ project }: { project: ImportRecord }) {
                     class's smali file. Originals are never touched, and Undo reverts your last change. When
                     you're done, use Build APK.
                   </p>
+                  <p className="small">
+                    For AI help, click ✦ AI at the top left of this panel: it opens beside the file you have
+                    open. « hides the side panels to give it more room.
+                  </p>
                 </div>
               )}
+              </div>
             </section>
+            {aiOpen && (
+              <aside className="ai-group">
+                <div className="ai-group-head">
+                  <span>
+                    <span aria-hidden="true">✦</span> AI
+                  </span>
+                  <span className="muted small ai-group-file" title={aiFile ?? undefined}>
+                    {aiFile ? `Reading ${aiFile.split("/").pop()}` : "No file open"}
+                  </span>
+                  <button className="editor-tab-close" aria-label="Close the AI group" onClick={() => setAiOpen(false)}>
+                    ×
+                  </button>
+                </div>
+                <div className="ai-group-body">
+                  {!aiFile && (
+                    <p className="muted small">Open a file from the tree on the left. The AI reads the active tab.</p>
+                  )}
+                  {aiFiles.map((f) => (
+                    <div key={f} hidden={f !== aiFile}>
+                      <AiPanel
+                        projectId={project.id}
+                        path={f}
+                        selection={f === aiFile ? (active?.selection ?? "") : ""}
+                        refreshKey={returns}
+                        onEdited={onEdited}
+                      />
+                    </div>
+                  ))}
+                </div>
+              </aside>
+            )}
           </div>
         ) : (
-          !error && <div className="screen muted">Analyzing the game…</div>
-        ))}
+          !error && tab === "content" && <div className="screen muted">Analyzing the game…</div>
+        )}
 
       {tab === "overview" && (
         <div className="screen">

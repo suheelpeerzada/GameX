@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import AiSettings from "../components/AiSettings";
 import { api, inDesktopApp, pickPath } from "../lib/api";
 import type { Settings, ToolStatus } from "../lib/types";
 
@@ -99,6 +100,9 @@ export default function SettingsScreen() {
         </button>
         {saved && <span className="muted small">Saved.</span>}
       </div>
+
+      <div className="settings-gap" />
+      <AiSettings />
     </div>
   );
 }

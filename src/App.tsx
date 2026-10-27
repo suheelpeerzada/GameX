@@ -1,15 +1,28 @@
 import { useCallback, useEffect, useState } from "react";
+import logo from "./assets/logo.png";
 import { api, containerLabel, inDesktopApp } from "./lib/api";
 import type { ImportRecord } from "./lib/types";
+import AboutScreen from "./screens/AboutScreen";
 import ImportScreen from "./screens/ImportScreen";
 import ProjectScreen from "./screens/ProjectScreen";
 import SettingsScreen from "./screens/SettingsScreen";
 
-type View = { kind: "import" } | { kind: "settings" } | { kind: "project"; id: string };
+type View = { kind: "import" } | { kind: "settings" } | { kind: "about" } | { kind: "project"; id: string };
 
 export default function App() {
   const [view, setView] = useState<View>({ kind: "import" });
   const [projects, setProjects] = useState<ImportRecord[]>([]);
+  // Projects opened this session stay mounted (hidden when not shown), so
+  // tabs, AI answers and unsaved edits survive a trip to Settings.
+  const [opened, setOpened] = useState<string[]>([]);
+  // Focus mode hides the sidebar and the project's tree.
+  const [focus, setFocus] = useState(false);
+
+  useEffect(() => {
+    if (view.kind === "project") {
+      setOpened((ids) => (ids.includes(view.id) ? ids : [...ids, view.id]));
+    }
+  }, [view]);
 
   const refresh = useCallback(async () => {
     if (!inDesktopApp) return;
@@ -20,7 +33,6 @@ export default function App() {
     refresh().catch(console.error);
   }, [refresh]);
 
-  const current = view.kind === "project" ? projects.find((p) => p.id === view.id) : undefined;
 
   const remove = async (project: ImportRecord) => {
     const ok = window.confirm(
@@ -34,13 +46,17 @@ export default function App() {
       window.alert(`Couldn't delete the project: ${e}`);
     }
     if (view.kind === "project" && view.id === project.id) setView({ kind: "import" });
+    setOpened((ids) => ids.filter((id) => id !== project.id));
     await refresh();
   };
 
   return (
     <div className="app">
-      <aside className="sidebar">
-        <div className="brand">GameX</div>
+      <aside className="sidebar" hidden={focus && view.kind === "project"}>
+        <div className="brand">
+          <img src={logo} alt="" className="brand-logo" />
+          GameX
+        </div>
         <nav>
           <button
             className={view.kind === "import" ? "nav active" : "nav"}
@@ -53,6 +69,12 @@ export default function App() {
             onClick={() => setView({ kind: "settings" })}
           >
             Settings
+          </button>
+          <button
+            className={view.kind === "about" ? "nav active" : "nav"}
+            onClick={() => setView({ kind: "about" })}
+          >
+            About
           </button>
         </nav>
         <div className="section-label">Projects</div>
@@ -95,7 +117,22 @@ export default function App() {
           />
         )}
         {view.kind === "settings" && <SettingsScreen />}
-        {view.kind === "project" && current && <ProjectScreen project={current} />}
+        {view.kind === "about" && <AboutScreen />}
+        {projects
+          .filter((p) => opened.includes(p.id))
+          .map((p) => {
+            const shown = view.kind === "project" && view.id === p.id;
+            return (
+              <div key={p.id} className="project-host" hidden={!shown}>
+                <ProjectScreen
+                  project={p}
+                  active={shown}
+                  focus={focus}
+                  onToggleFocus={() => setFocus((f) => !f)}
+                />
+              </div>
+            );
+          })}
       </main>
     </div>
   );

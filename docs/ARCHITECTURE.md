@@ -21,9 +21,17 @@ This note fixes the shape of the system before features are built.
    recovered.
 2. **Universal Editor** (`src/`): the UI. It only ever talks to the common
    `GameProject` model, never to engine-specific formats.
-3. **AI Extension** (later): an optional panel behind an `AiProvider`
-   interface. Claude via the Anthropic API is the first provider. The app
-   must work fully without it.
+3. **AI Extension** (`src-tauri/src/ai/`): an optional assistant in the
+   inspector. The user pastes an API key; the provider (Anthropic, OpenAI,
+   OpenRouter, Gemini) is detected from its prefix and the model is chosen
+   from the ones that key can use (Claude Opus 5.5 by default for Anthropic).
+   The key is kept in Windows Credential Manager and all calls run in the
+   backend. For a file or selection it explains the code, shows where the
+   class is used (references found in smali), lists tunable values, and
+   proposes search-and-replace edits. Edits are checked (each must match
+   exactly once; smali constants must fit their instruction) and saved only
+   after the user approves, through the normal edit store, so Undo works.
+   Nothing is sent until the user clicks. The app works fully without it.
 4. **Game Projection** (later): a separate module with its own process model.
    Nothing in phases 1 to 3 depends on it.
 

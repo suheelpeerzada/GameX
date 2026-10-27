@@ -60,6 +60,17 @@ back it up). Only a game's developer has its original key, so a rebuilt game
 can't install over the original. Either uninstall the original first, or give
 the build a different package name so both can be installed.
 
+## AI assistant (optional)
+
+Under **Settings → AI assistant**, paste an API key from Anthropic, OpenAI,
+OpenRouter or Google Gemini. GameX detects the provider from the key and
+lists the models it can use. Then, in the inspector, any text file or a
+selected part of it can be explained, its uses across the game shown, and its
+values changed: the AI proposes the edit, you see it before it's saved, and
+Undo reverts it. API usage is billed by the provider; a Claude Pro
+subscription doesn't include API access (create a key at
+console.anthropic.com). The key is kept in Windows Credential Manager.
+
 ## Where imports go
 
 `%APPDATA%\com.gamex.app\workspace\<project-id>\`:

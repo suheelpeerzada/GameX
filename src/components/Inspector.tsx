@@ -11,13 +11,30 @@ interface Props {
   revision: number;
   onMove: (category: Category | null) => void;
   onEdited: (state: EditState) => void;
+  /** Reports the file shown and the selected text, for the AI group. */
+  onContext: (file: string | null, selection: string) => void;
 }
 
-export default function Inspector({ projectId, object, edited, revision, onMove, onEdited }: Props) {
+export default function Inspector({ projectId, object, edited, revision, onMove, onEdited, onContext }: Props) {
   // The parent keys this component by object id, so this resets per object.
   const [file, setFile] = useState(object.sourceFiles[0] ?? null);
   const [editing, setEditing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Text selected in the preview, for "Explain selection".
+  const [selection, setSelection] = useState("");
+  const previewRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    onContext(file, selection);
+    // onContext is a new function on every parent render; only changes matter.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [file, selection]);
+
+  const captureSelection = () => {
+    const sel = window.getSelection();
+    const inside = sel && previewRef.current && sel.anchorNode && previewRef.current.contains(sel.anchorNode);
+    setSelection(inside ? sel.toString() : "");
+  };
 
   const moved = object.category !== object.autoCategory;
 
@@ -34,6 +51,7 @@ export default function Inspector({ projectId, object, edited, revision, onMove,
     setFile(f);
     setEditing(false);
     setError(null);
+    setSelection("");
   };
 
   return (
@@ -130,6 +148,7 @@ export default function Inspector({ projectId, object, edited, revision, onMove,
           <TextEditor
             projectId={projectId}
             path={file}
+            onSelectText={setSelection}
             onCancel={() => setEditing(false)}
             onSaved={(state) => {
               onEdited(state);
@@ -137,8 +156,11 @@ export default function Inspector({ projectId, object, edited, revision, onMove,
             }}
           />
         ) : (
-          <FilePreview key={`${file}:${revision}`} projectId={projectId} path={file} />
+          <div ref={previewRef} onMouseUp={captureSelection} onKeyUp={captureSelection}>
+            <FilePreview key={`${file}:${revision}`} projectId={projectId} path={file} />
+          </div>
         ))}
+
     </div>
   );
 }
@@ -209,6 +231,7 @@ function FileActions(props: {
 function TextEditor(props: {
   projectId: string;
   path: string;
+  onSelectText: (text: string) => void;
   onCancel: () => void;
   onSaved: (state: EditState) => void;
 }) {
@@ -275,6 +298,10 @@ function TextEditor(props: {
         value={text}
         spellCheck={false}
         onChange={(e) => setText(e.target.value)}
+        onSelect={(e) => {
+          const el = e.currentTarget;
+          props.onSelectText(el.value.slice(el.selectionStart, el.selectionEnd));
+        }}
         onKeyDown={(e) => {
           if (e.key === "s" && (e.ctrlKey || e.metaKey)) {
             e.preventDefault();

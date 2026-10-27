@@ -2,11 +2,17 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import type {
+  AiStatus,
+  Answer,
   BuildInfo,
   BuildOptions,
   BuildResult,
   Category,
   EditState,
+  Explanation,
+  ModelInfo,
+  Proposal,
+  ValueChange,
   GameProject,
   ImportProgress,
   ImportRecord,
@@ -40,6 +46,17 @@ export const api = {
   getBuildInfo: (id: string) => invoke<BuildInfo>("get_build_info", { id }),
   buildApk: (id: string, options: BuildOptions) => invoke<BuildResult>("build_apk", { id, options }),
   readPng: (path: string) => invoke<string>("read_png", { path }),
+  aiStatus: () => invoke<AiStatus>("ai_status"),
+  aiSetKey: (key: string) => invoke<{ status: AiStatus; models: ModelInfo[] }>("ai_set_key", { key }),
+  aiModels: () => invoke<ModelInfo[]>("ai_models"),
+  aiSetModel: (model: string) => invoke<AiStatus>("ai_set_model", { model }),
+  aiClearKey: () => invoke<AiStatus>("ai_clear_key"),
+  aiExplain: (id: string, path: string, selection: string | null) =>
+    invoke<Explanation>("ai_explain", { id, path, selection }),
+  aiAsk: (id: string, path: string, selection: string | null, question: string) =>
+    invoke<Answer>("ai_ask", { id, path, selection, question }),
+  aiPropose: (id: string, path: string, selection: string | null, changes: ValueChange[], instruction: string) =>
+    invoke<Proposal>("ai_propose", { id, path, selection, changes, instruction }),
   onBuildProgress: (handler: (p: ImportProgress) => void): Promise<UnlistenFn> =>
     listen<ImportProgress>("build-progress", (e) => handler(e.payload)),
   getSettings: () => invoke<Settings>("get_settings"),

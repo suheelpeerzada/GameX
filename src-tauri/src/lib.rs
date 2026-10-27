@@ -1,3 +1,4 @@
+pub mod ai;
 pub mod analyzer;
 mod commands;
 pub mod edits;
@@ -14,6 +15,7 @@ use tauri::Manager;
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             app.manage(commands::AppState::new(data_dir));
@@ -36,6 +38,14 @@ pub fn run() {
             commands::get_build_info,
             commands::build_apk,
             commands::read_png,
+            commands::ai_status,
+            commands::ai_set_key,
+            commands::ai_models,
+            commands::ai_set_model,
+            commands::ai_clear_key,
+            commands::ai_explain,
+            commands::ai_ask,
+            commands::ai_propose,
             commands::get_settings,
             commands::save_settings,
             commands::tool_status,

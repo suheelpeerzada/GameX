@@ -1,0 +1,113 @@
+import { useEffect, useRef, useState } from "react";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { api, inDesktopApp, pickPath, type PickKind } from "../lib/api";
+import type { ImportProgress, ImportRecord } from "../lib/types";
+
+const SOURCES: { kind: PickKind; title: string; detail: string }[] = [
+  {
+    kind: "apk",
+    title: "Android APK",
+    detail: "Unpacked with apktool and jadx when installed. The APK itself is never changed.",
+  },
+  {
+    kind: "zip",
+    title: "ZIP archive",
+    detail: "A ZIP of game files or of an already decompiled project.",
+  },
+  {
+    kind: "folder",
+    title: "Folder",
+    detail: "A game folder on disk. GameX works on a copy, never the folder itself.",
+  },
+];
+
+type Props = { onImported: (record: ImportRecord) => void };
+
+export default function ImportScreen({ onImported }: Props) {
+  const [busy, setBusy] = useState(false);
+  const [log, setLog] = useState<ImportProgress[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [dragging, setDragging] = useState(false);
+  const busyRef = useRef(false);
+
+  const run = async (path: string) => {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    setBusy(true);
+    setError(null);
+    setLog([]);
+    const unlisten = await api.onImportProgress((p) => setLog((l) => [...l, p]));
+    try {
+      onImported(await api.importGame(path));
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      unlisten();
+      busyRef.current = false;
+      setBusy(false);
+    }
+  };
+
+  // Dropping a file or folder anywhere on the window imports it.
+  useEffect(() => {
+    if (!inDesktopApp) return;
+    const pending = getCurrentWebview().onDragDropEvent((event) => {
+      const { type } = event.payload;
+      if (type === "enter" || type === "over") setDragging(true);
+      else setDragging(false);
+      if (type === "drop" && event.payload.paths.length > 0) run(event.payload.paths[0]);
+    });
+    return () => {
+      pending.then((unlisten) => unlisten());
+    };
+  }, []);
+
+  const choose = async (kind: PickKind) => {
+    const path = await pickPath(kind);
+    if (path) run(path);
+  };
+
+  return (
+    <div className="screen">
+      <h1>Import a game</h1>
+      <p className="muted">
+        Pick how the game is packaged, or drop it onto this window. GameX keeps the original
+        untouched and unpacks a working copy.
+      </p>
+
+      <div className={dragging ? "sources dragging" : "sources"}>
+        {SOURCES.map((s) => (
+          <button
+            key={s.kind}
+            className="source-card"
+            disabled={busy || !inDesktopApp}
+            onClick={() => choose(s.kind)}
+          >
+            <span className="source-title">{s.title}</span>
+            <span className="muted small">{s.detail}</span>
+          </button>
+        ))}
+      </div>
+
+      {(busy || log.length > 0) && (
+        <section className="panel">
+          <h2>{busy ? "Importing…" : "Last import"}</h2>
+          <ol className="log">
+            {log.map((entry, i) => (
+              <li key={i} className={busy && i === log.length - 1 ? "current" : undefined}>
+                {entry.message}
+              </li>
+            ))}
+          </ol>
+        </section>
+      )}
+
+      {error && (
+        <section className="panel error">
+          <h2>Import failed</h2>
+          <p>{error}</p>
+        </section>
+      )}
+    </div>
+  );
+}

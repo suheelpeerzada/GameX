@@ -70,3 +70,15 @@ export function nearest(points: { x: number; y: number }[], p: { x: number; y: n
   });
   return best;
 }
+
+/** One marker color per class, so a class's objects can be told apart. */
+export const MARKER_COLORS = ["#ffc400", "#ff6b6b", "#4dd0e1", "#b388ff", "#69f0ae", "#ff9e40", "#f06292", "#aeea00", "#40c4ff", "#e0e0e0"];
+
+/** The classes among placed objects, by name, with how many of each and a color. */
+export function classGroups(objects: { class: string }[]): { name: string; count: number; color: string }[] {
+  const count = new Map<string, number>();
+  for (const o of objects) count.set(o.class, (count.get(o.class) ?? 0) + 1);
+  return [...count.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([name, n], i) => ({ name, count: n, color: MARKER_COLORS[i % MARKER_COLORS.length] }));
+}

@@ -1188,6 +1188,12 @@ pre.code { line-height: 1.5; }
 .pick-marker text { fill: #fff; text-anchor: middle; paint-order: stroke; stroke: #000; stroke-width: 4px; font-weight: 600; }
 .pick-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 0 0 8px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
 .pick-bar .grow { flex: 1; min-width: 200px; }
+.pick-classes { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: center; padding-top: 6px; border-top: 1px solid var(--border); }
+.pick-classes .row { flex-basis: 100%; gap: 8px; }
+.pick-class { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; cursor: pointer; }
+.pick-class .count { color: var(--muted); }
+.pick-swatch { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+.pick-class.off .pick-swatch { opacity: 0.3; }
 .pick-hit { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; margin-top: 6px; }
 
 /* Header: the name shortens instead of wrapping in narrow windows */

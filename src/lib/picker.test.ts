@@ -1,7 +1,7 @@
 // Run with `npm test` (Node's own test runner; Node strips the types).
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { nearest, solveCalibration, toScreen } from "./picker.ts";
+import { classGroups, nearest, solveCalibration, toScreen } from "./picker.ts";
 
 const close = (a: number, b: number) => assert.ok(Math.abs(a - b) < 1e-6, `${a} != ${b}`);
 
@@ -45,4 +45,11 @@ test("picks the nearest point within reach", () => {
   const points = [{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 100, y: 100 }];
   assert.equal(nearest(points, { x: 8, y: 1 }, 20), 1);
   assert.equal(nearest(points, { x: 60, y: 60 }, 20), -1);
+});
+
+test("groups placed objects by class with a stable color each", () => {
+  const groups = classGroups([{ class: "g.Enemy" }, { class: "g.Door" }, { class: "g.Enemy" }]);
+  assert.deepEqual(groups.map((g) => [g.name, g.count]), [["g.Door", 1], ["g.Enemy", 2]]);
+  assert.notEqual(groups[0].color, groups[1].color);
+  assert.deepEqual(classGroups([]), []);
 });

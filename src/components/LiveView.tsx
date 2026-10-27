@@ -1,8 +1,8 @@
-import { Activity, Crosshair, Link2, Link2Off, Play, RefreshCw, Search } from "lucide-react";
+import { Activity, Crosshair, Eye, EyeOff, Link2, Link2Off, Play, RefreshCw, Search } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../lib/api";
 import { categories } from "../lib/categories";
-import { type Calibration, type CalibrationPoint, nearest, solveCalibration, toScreen } from "../lib/picker";
+import { type Calibration, type CalibrationPoint, classGroups, nearest, solveCalibration, toScreen } from "../lib/picker";
 import type { Category, GameObject, LiveClassCount, LiveField, LiveInstance, LiveObject, LivePosition, UiNode } from "../lib/types";
 import { CategoryIcon } from "../lib/visuals";
 import GameScreen, { type PickMarker, type PickMode } from "./GameScreen";
@@ -22,6 +22,18 @@ function loadCalibration(projectId: string): Calibrated {
     // Nothing saved, or storage is off.
   }
   return { calibration: null, points: [] };
+}
+
+const hiddenKey = (projectId: string) => `gamex.pick.hidden.${projectId}`;
+
+function loadHidden(projectId: string): Set<string> {
+  try {
+    const saved = JSON.parse(localStorage.getItem(hiddenKey(projectId)) ?? "[]");
+    if (Array.isArray(saved)) return new Set(saved.filter((c) => typeof c === "string"));
+  } catch {
+    // Nothing saved, or storage is off.
+  }
+  return new Set();
 }
 
 /** How close (device pixels) the pointer must be to an object to hit it. */
@@ -64,6 +76,9 @@ export default function LiveView({ projectId, objects, onOpenObject, onRun, visi
   const [calibrating, setCalibrating] = useState(false);
   const [uiHit, setUiHit] = useState<UiNode | null>(null);
   const [pickNote, setPickNote] = useState<string | null>(null);
+  // Classes whose objects aren't drawn over the screen (chosen by the user).
+  const [hidden, setHidden] = useState<Set<string>>(() => loadHidden(projectId));
+  const [showClasses, setShowClasses] = useState(false);
   const positionsBusy = useRef(false);
 
   // The game's own classes (not libraries), grouped by category.
@@ -190,17 +205,34 @@ export default function LiveView({ projectId, objects, onOpenObject, onRun, visi
     }
   };
 
+  const saveHidden = (next: Set<string>) => {
+    setHidden(next);
+    try {
+      localStorage.setItem(hiddenKey(projectId), JSON.stringify([...next]));
+    } catch {
+      // Not remembered across restarts; still works now.
+    }
+  };
+
+  // An object at exactly 0,0 is almost always one not placed yet.
+  const placed = useMemo(() => positions.filter((p) => p.x !== 0 || p.y !== 0), [positions]);
+  // The classes with objects that could be drawn, and how many of each.
+  const placedClasses = useMemo(() => classGroups(placed), [placed]);
+
   const calibration = calibrated.calibration;
   const markers: (PickMarker & { position: LivePosition })[] = useMemo(() => {
     if (!calibration) return [];
-    // An object at exactly 0,0 is almost always one not placed yet.
-    return positions.filter((p) => p.x !== 0 || p.y !== 0).map((p) => ({
-      ...toScreen(calibration, p.x, p.y),
-      key: p.object,
-      label: `${p.class.split(".").pop()} #${p.object}`,
-      position: p,
-    }));
-  }, [positions, calibration]);
+    const colors = new Map(placedClasses.map((c) => [c.name, c.color]));
+    return placed
+      .filter((p) => !hidden.has(p.class))
+      .map((p) => ({
+        ...toScreen(calibration, p.x, p.y),
+        key: p.object,
+        label: `${p.class.split(".").pop()} #${p.object}`,
+        color: colors.get(p.class),
+        position: p,
+      }));
+  }, [placed, placedClasses, hidden, calibration]);
   const hovered = pointer && !calibrating ? nearest(markers, pointer, PICK_RADIUS) : -1;
   const selectedPosition = positions.find((p) => p.object === selectedObject);
 
@@ -263,6 +295,7 @@ export default function LiveView({ projectId, objects, onOpenObject, onRun, visi
       x: m.x,
       y: m.y,
       label: m.label,
+      color: m.color,
       state: i === hovered ? "hover" : m.key === selectedObject ? "selected" : undefined,
     })),
     box: uiHit && !uiHit.surface ? uiHit.bounds : null,
@@ -323,6 +356,15 @@ export default function LiveView({ projectId, objects, onOpenObject, onRun, visi
           </div>
         )}
       </div>
+      {connected && calibration && placedClasses.length > 0 && (
+        <button
+          className={showClasses ? "small active" : "small"}
+          onClick={() => setShowClasses((s) => !s)}
+          title="Choose which kinds of objects are marked on the screen"
+        >
+          <Eye size={13} /> Shown ({placedClasses.filter((c) => !hidden.has(c.name)).length}/{placedClasses.length})
+        </button>
+      )}
       {connected && !calibration && !calibrating && (
         <button className="small" onClick={startCalibrating}>
           Line up objects
@@ -337,6 +379,40 @@ export default function LiveView({ projectId, objects, onOpenObject, onRun, visi
         <button className="small" onClick={() => { setCalibrating(false); setPickNote(null); }}>
           Cancel
         </button>
+      )}
+      {connected && calibration && showClasses && placedClasses.length > 0 && (
+        <div className="pick-classes">
+          <div className="row small">
+            <span className="muted">Mark on screen:</span>
+            <button className="link" onClick={() => saveHidden(new Set())}>
+              all
+            </button>
+            <button className="link" onClick={() => saveHidden(new Set(placedClasses.map((c) => c.name)))}>
+              none
+            </button>
+          </div>
+          {placedClasses.map((c) => {
+            const shown = !hidden.has(c.name);
+            return (
+              <label key={c.name} className={shown ? "pick-class" : "pick-class off"} title={c.name}>
+                <input
+                  type="checkbox"
+                  checked={shown}
+                  onChange={() => {
+                    const next = new Set(hidden);
+                    if (shown) next.add(c.name);
+                    else next.delete(c.name);
+                    saveHidden(next);
+                  }}
+                />
+                <span className="pick-swatch" style={{ background: c.color }} />
+                {shown ? <span>{c.name.split(".").pop()}</span> : <span className="muted">{c.name.split(".").pop()}</span>}
+                <span className="count">{c.count}</span>
+                {!shown && <EyeOff size={12} className="muted" />}
+              </label>
+            );
+          })}
+        </div>
       )}
     </div>
   );

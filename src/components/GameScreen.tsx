@@ -18,6 +18,8 @@ export interface PickMarker {
   y: number;
   label: string;
   state?: "hover" | "selected";
+  /** The marker's color when it isn't hovered or selected (one per class). */
+  color?: string;
 }
 
 /** Pick mode: hovering and clicking find things instead of touching the game. */
@@ -264,7 +266,12 @@ export default function GameScreen({ projectId, visible, pick }: { projectId: st
               .filter((m) => m.x >= -20 && m.y >= -20 && m.x <= setup.deviceWidth + 20 && m.y <= setup.deviceHeight + 20)
               .map((m) => (
                 <g key={m.key} className={m.state ? `pick-marker ${m.state}` : "pick-marker"}>
-                  <circle cx={m.x} cy={m.y} r={m.state ? 22 : 12} />
+                  <circle
+                    cx={m.x}
+                    cy={m.y}
+                    r={m.state ? 22 : 12}
+                    style={!m.state && m.color ? { stroke: m.color, fill: `${m.color}40` } : undefined}
+                  />
                   {m.state && (
                     <text x={m.x} y={m.y - 32} fontSize={setup.deviceWidth / 26}>
                       {m.label}

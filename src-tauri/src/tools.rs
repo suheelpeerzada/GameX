@@ -9,6 +9,21 @@ use serde::Serialize;
 
 use crate::settings::Settings;
 
+/// A command for a background tool (adb, java, apktool...). On Windows it
+/// runs without a console window: GameX is a windowed app, so each tool
+/// would otherwise flash up its own console and take the keyboard focus.
+pub fn command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    #[allow(unused_mut)]
+    let mut command = Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
     Apktool,
@@ -137,7 +152,7 @@ fn find_jar_on_path(prefix: &str) -> Option<PathBuf> {
 
 /// Runs a tool and returns stderr (or stdout) on failure, trimmed for display.
 pub fn run(program: &Path, args: &[&std::ffi::OsStr]) -> Result<(), String> {
-    let mut command = Command::new(program);
+    let mut command = command(program);
     command.args(args);
     // Tools started from .bat files (apktool, jadx) find Java through
     // JAVA_HOME and PATH: point both at GameX's own runtime when installed.

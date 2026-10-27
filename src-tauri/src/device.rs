@@ -8,7 +8,6 @@
 //! emulator).
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
@@ -97,7 +96,7 @@ fn general_adb() -> Option<PathBuf> {
 
 /// Runs a program and returns its output (stdout and stderr together).
 fn output(program: &Path, args: &[&str]) -> Result<String, String> {
-    let out = Command::new(program)
+    let out = crate::tools::command(program)
         .args(args)
         .output()
         .map_err(|e| format!("Couldn't start {}: {e}", program.display()))?;
@@ -264,7 +263,7 @@ fn ready(target: &str, progress: &mut impl FnMut(&str)) -> Result<Adb, String> {
         if !adb.online() {
             progress("Starting BlueStacks");
             if let Some(player) = crate::toolbox::detect_bluestacks() {
-                let _ = Command::new(player).spawn();
+                let _ = crate::tools::command(player).spawn();
             }
             let deadline = Instant::now() + Duration::from_secs(120);
             while output(&adb.exe, &["connect", serial]).map_or(true, |o| !o.contains("connected")) {

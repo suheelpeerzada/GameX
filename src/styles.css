@@ -1167,10 +1167,13 @@ pre.code { line-height: 1.5; }
 .live-input:hover { border-color: var(--border); }
 .live-input.editing, .live-input:focus { border-color: var(--accent); background: var(--raised); outline: none; }
 .live-keep-cell { width: 28px; padding: 0 !important; text-align: center; }
-.live-keep { opacity: 0; }
+.live-keep { opacity: 0.35; }
 .live-fields tr:hover .live-keep, .live-keep:focus-visible, .live-keep.changed { opacity: 1; }
 .live-keep.changed { color: var(--accent); }
 .live-kept { margin: 0 16px 8px; flex-wrap: wrap; }
+.live-changes { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; margin: 0 16px 8px; padding: 6px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
+.live-changes label { display: inline-flex; align-items: center; gap: 5px; }
+.live-change { display: inline-block; margin-right: 6px; padding: 1px 6px; border-radius: 4px; background: var(--raised); font-size: 11px; }
 .live-kept .grow { flex: 1; min-width: 220px; }
 .live-note { padding: 6px 16px; margin: 0; border-top: 1px solid var(--border); }
 

@@ -4,7 +4,7 @@
 //! `adb shell` as `input` commands, so each tap doesn't start a process.
 
 use std::io::{Read, Write};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -133,7 +133,7 @@ impl Mirror {
             let mut sent_setup = false;
             // screenrecord stops after 3 minutes; start it again until stopped.
             while !stop_t.load(Ordering::SeqCst) {
-                let child = Command::new(&adb_t)
+                let child = crate::tools::command(&adb_t)
                     .args(["-s", &serial_t, "exec-out", "screenrecord", "--output-format=h264"])
                     .arg(format!("--size={w}x{h}"))
                     .args(["--bit-rate=6000000", "--time-limit=180", "-"])
@@ -203,7 +203,7 @@ impl Mirror {
         let mut shell = self.shell.lock().unwrap();
         for attempt in 0..2 {
             if shell.is_none() {
-                let mut child = Command::new(&self.adb)
+                let mut child = crate::tools::command(&self.adb)
                     .args(["-s", &self.serial, "shell"])
                     .stdin(Stdio::piped())
                     .stdout(Stdio::null())
@@ -234,7 +234,7 @@ impl Drop for Mirror {
 }
 
 fn run(adb: &std::path::Path, serial: &str, args: &[&str]) -> Result<String, String> {
-    let out = Command::new(adb)
+    let out = crate::tools::command(adb)
         .args(["-s", serial])
         .args(args)
         .output()

@@ -127,7 +127,7 @@ export const api = {
   liveObject: (id: string, object: string) => invoke<LiveObject>("live_object", { id, object }),
   liveSet: (id: string, object: string, field: string, value: string) =>
     invoke<string>("live_set", { id, object, field, value }),
-  liveKeep: (id: string, cls: string, field: LiveField, value: string) =>
+  liveKeep: (id: string, cls: string, field: Pick<LiveField, "name" | "owner" | "signature" | "isStatic">, value: string) =>
     invoke<KeptChange>("live_keep", {
       id,
       class: cls,

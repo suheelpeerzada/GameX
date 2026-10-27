@@ -2,6 +2,7 @@ import { Activity, Crosshair, Eye, EyeOff, Link2, Link2Off, Pin, Play, RefreshCw
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../lib/api";
 import { categories } from "../lib/categories";
+import { type LiveChange, markKept, recordLiveChange } from "../lib/livechanges";
 import { type Calibration, type CalibrationPoint, classGroups, nearest, solveCalibration, toScreen } from "../lib/picker";
 import type { Category, EditState, GameObject, KeptChange, LiveClassCount, LiveField, LiveInstance, LiveObject, LivePosition, UiNode } from "../lib/types";
 import { CategoryIcon } from "../lib/visuals";
@@ -22,6 +23,16 @@ function loadCalibration(projectId: string): Calibrated {
     // Nothing saved, or storage is off.
   }
   return { calibration: null, points: [] };
+}
+
+const autoKeepKey = (projectId: string) => `gamex.live.autokeep.${projectId}`;
+
+function loadFlag(key: string): boolean {
+  try {
+    return localStorage.getItem(key) === "1";
+  } catch {
+    return false;
+  }
 }
 
 const hiddenKey = (projectId: string) => `gamex.pick.hidden.${projectId}`;
@@ -75,6 +86,12 @@ export default function LiveView({ projectId, objects, onOpenObject, onRun, onEd
   // "Keep" keeps exactly that rather than the rounded value shown.
   const [typed, setTyped] = useState<Record<string, string>>({});
   const [kept, setKept] = useState<(KeptChange & { field: string; value: string; isStatic: boolean }) | null>(null);
+  // Every field changed live this session, so all of them can be kept in
+  // the game; changing a field again replaces its entry.
+  const [changes, setChanges] = useState<LiveChange[]>([]);
+  const [autoKeep, setAutoKeep] = useState(() => loadFlag(autoKeepKey(projectId)));
+  const [keepingAll, setKeepingAll] = useState(false);
+  const [keptAll, setKeptAll] = useState<number | null>(null);
 
   // The picker: hover/click on the game's screen to find what's there.
   const [picking, setPicking] = useState(false);
@@ -435,17 +452,48 @@ export default function LiveView({ projectId, objects, onOpenObject, onRun, onEd
     return groups;
   }, [classes, counts, onlyLive]);
 
-  const keep = async (field: LiveField) => {
-    if (!object) return;
-    const value = typed[field.fieldId] ?? field.value;
+  /** Keeps one value in the game's code. Returns whether it worked. */
+  const keepValue = async (cls: string, field: LiveChange["field"], value: string, notify = true): Promise<boolean> => {
     try {
-      const result = await api.liveKeep(projectId, object.class, field, value);
-      setKept({ ...result, field: field.name, value, isStatic: field.isStatic });
+      const result = await api.liveKeep(projectId, cls, field, value);
+      if (notify) setKept({ ...result, field: field.name, value, isStatic: field.isStatic });
       setError(null);
       onEdited(result.edits);
+      setChanges((list) => markKept(list, cls, field, value));
+      return true;
     } catch (e) {
-      setKept(null);
-      setError(String(e));
+      if (notify) setKept(null);
+      setError(`${field.name}: ${e}`);
+      return false;
+    }
+  };
+
+  const keep = (field: LiveField) => {
+    if (object) keepValue(object.class, field, typed[field.fieldId] ?? field.value);
+  };
+
+  const recordChange = (cls: string, field: LiveField, value: string) => {
+    setChanges((list) => recordLiveChange(list, cls, field, value));
+    if (autoKeep) keepValue(cls, field, value, false);
+  };
+
+  const unkept = changes.filter((c) => !c.kept);
+  const keepAll = async () => {
+    setKeepingAll(true);
+    setKept(null);
+    let done = 0;
+    for (const c of unkept) if (await keepValue(c.cls, c.field, c.value, false)) done++;
+    setKeepingAll(false);
+    if (done > 0) setError(null);
+    setKeptAll(done);
+  };
+
+  const toggleAutoKeep = (on: boolean) => {
+    setAutoKeep(on);
+    try {
+      localStorage.setItem(autoKeepKey(projectId), on ? "1" : "0");
+    } catch {
+      // Not remembered across restarts; still works now.
     }
   };
 
@@ -524,6 +572,39 @@ export default function LiveView({ projectId, objects, onOpenObject, onRun, onEd
       )}
 
       {pickPanel}
+      <div className="live-changes small">
+        <span>
+          {changes.length === 0
+            ? "Live changes last until the game restarts."
+            : unkept.length === 0
+              ? `All ${changes.length} live change${changes.length === 1 ? " is" : "s are"} kept in the game.`
+              : `${unkept.length} live change${unkept.length === 1 ? "" : "s"} not kept yet:`}{" "}
+          {unkept.slice(0, 4).map((c) => (
+            <span key={c.key} className="mono live-change">
+              {c.cls.split(".").pop()}.{c.field.name} = {c.value}
+            </span>
+          ))}
+          {unkept.length > 4 && <span className="muted"> and {unkept.length - 4} more</span>}
+          {keptAll !== null && unkept.length === 0 && changes.length > 0 && (
+            <span className="muted"> Build APK to install them.</span>
+          )}
+        </span>
+        <span className="status-spacer" />
+        <label title="Each change you make is also saved in the game's code, so the next Build APK has it on any device">
+          <input type="checkbox" checked={autoKeep} onChange={(e) => toggleAutoKeep(e.target.checked)} /> Keep changes
+          automatically
+        </label>
+        {unkept.length > 0 && (
+          <button className="small primary" onClick={keepAll} disabled={keepingAll}>
+            <Pin size={13} /> {keepingAll ? "Keeping…" : "Keep all in the game"}
+          </button>
+        )}
+        {changes.length > 0 && unkept.length === 0 && (
+          <button className="small" onClick={onBuild}>
+            Build APK
+          </button>
+        )}
+      </div>
       {kept && (
         <div className="notice small live-kept">
           <Pin size={14} />
@@ -650,6 +731,7 @@ export default function LiveView({ projectId, objects, onOpenObject, onRun, onEd
                         try {
                           const shown = await api.liveSet(projectId, object.id, f.fieldId, value);
                           setTyped((t) => ({ ...t, [f.fieldId]: value }));
+                          recordChange(object.class, f, value);
                           setObject((o) => o && { ...o, fields: o.fields.map((x) => (x.fieldId === f.fieldId ? { ...x, value: shown } : x)) });
                           setError(null);
                           return true;
@@ -667,8 +749,8 @@ export default function LiveView({ projectId, objects, onOpenObject, onRun, onEd
         </section>
       </div>
       <p className="muted tiny live-note">
-        Changes apply to the running game immediately and last until the game restarts. To keep one, use the pin
-        next to it: the game's code is changed to set that value, and the next Build APK includes it.
+        Changes apply to the running game immediately. To make them part of the game (on any device, after the next
+        Build APK), use “Keep all in the game”, the pin next to a field, or “Keep changes automatically”.
       </p>
     </div>
     </div>

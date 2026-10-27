@@ -111,7 +111,7 @@ pub fn parse_wm_size(text: &str) -> Option<(u32, u32)> {
         .filter_map(|l| l.split(':').nth(1))
         .filter_map(|v| v.trim().split_once('x'))
         .filter_map(|(w, h)| Some((w.trim().parse().ok()?, h.trim().parse().ok()?)))
-        .last()
+        .next_back()
 }
 
 impl Mirror {

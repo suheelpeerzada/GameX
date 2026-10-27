@@ -14,6 +14,8 @@ import type {
   LiveClassCount,
   LiveInstance,
   LiveObject,
+  LivePosition,
+  UiNode,
   BuildOptions,
   BuildResult,
   Category,
@@ -105,6 +107,8 @@ export const api = {
   liveObject: (id: string, object: string) => invoke<LiveObject>("live_object", { id, object }),
   liveSet: (id: string, object: string, field: string, value: string) =>
     invoke<string>("live_set", { id, object, field, value }),
+  livePositions: (id: string, classes: string[]) => invoke<LivePosition[]>("live_positions", { id, classes }),
+  uiPick: (id: string, x: number, y: number) => invoke<UiNode | null>("ui_pick", { id, x, y }),
   onRunProgress: (handler: (p: ImportProgress) => void): Promise<UnlistenFn> =>
     listen<ImportProgress>("run-progress", (e) => handler(e.payload)),
   toolInstall: (id: string) => invoke<ToolInfo>("tool_install", { id }),

@@ -16,6 +16,7 @@ pub mod scene;
 pub mod settings;
 pub mod toolbox;
 pub mod tools;
+pub mod uiview;
 pub mod workspace;
 
 use tauri::Manager;
@@ -81,6 +82,8 @@ pub fn run() {
             commands::live_instances,
             commands::live_object,
             commands::live_set,
+            commands::live_positions,
+            commands::ui_pick,
             commands::tool_install,
             commands::tool_uninstall,
             commands::tools_missing,

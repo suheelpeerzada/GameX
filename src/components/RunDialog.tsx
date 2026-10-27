@@ -174,7 +174,7 @@ export default function RunDialog({ projectId, open, onClose, onRunning, onOpenS
                   {targets === null && <option>Looking for emulators…</option>}
                   {targets?.map((t) => (
                     <option key={t.id} value={t.id}>
-                      {t.name} ({t.kind === "ldplayer" ? "LDPlayer" : "device"}
+                      {t.name} ({t.kind === "ldplayer" ? "LDPlayer" : t.kind === "bluestacks" ? "BlueStacks" : "device"}
                       {t.running ? ", running" : ""})
                     </option>
                   ))}

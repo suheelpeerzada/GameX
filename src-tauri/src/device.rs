@@ -48,6 +48,48 @@ fn ldplayer() -> Option<LdPlayer> {
     Some(LdPlayer { console, dir })
 }
 
+/// BlueStacks instances from its settings file: (instance, display name, adb port).
+/// Lines look like `bst.instance.Pie64.adb_port="5555"`.
+pub fn bluestacks_instances(conf: &str) -> Vec<(String, String, u16)> {
+    let value = |line: &str| line.split_once('=').map(|(_, v)| v.trim().trim_matches('"').to_string());
+    let mut out: Vec<(String, String, u16)> = Vec::new();
+    for line in conf.lines() {
+        let Some(rest) = line.trim().strip_prefix("bst.instance.") else { continue };
+        let Some((instance, key)) = rest.split_once('.') else { continue };
+        let key = key.split('=').next().unwrap_or("");
+        let entry = match out.iter().position(|(i, _, _)| i == instance) {
+            Some(i) => i,
+            None => {
+                out.push((instance.to_string(), instance.to_string(), 0));
+                out.len() - 1
+            }
+        };
+        match key {
+            "adb_port" | "status.adb_port" => {
+                if let Some(port) = value(line).and_then(|v| v.parse().ok()) {
+                    out[entry].2 = port;
+                }
+            }
+            "display_name" => {
+                if let Some(name) = value(line).filter(|v| !v.is_empty()) {
+                    out[entry].1 = name;
+                }
+            }
+            _ => {}
+        }
+    }
+    out.retain(|(_, _, port)| *port > 0);
+    out
+}
+
+/// BlueStacks' adb and settings, when installed.
+fn bluestacks() -> Option<(PathBuf, String)> {
+    let player = crate::toolbox::detect_bluestacks()?;
+    let adb = player.parent()?.join("HD-Adb.exe");
+    let conf = std::fs::read_to_string(Path::new("C:\\ProgramData\\BlueStacks_nxt\\bluestacks.conf")).ok()?;
+    Some((if adb.is_file() { adb } else { general_adb()? }, conf))
+}
+
 /// adb for phones and other emulators: GameX's platform tools, then PATH.
 fn general_adb() -> Option<PathBuf> {
     crate::toolbox::installed("platform-tools").or_else(|| crate::tools::find_on_path("adb"))
@@ -156,6 +198,23 @@ pub fn targets() -> Vec<Target> {
             });
         }
     }
+    if let Some((adb, conf)) = bluestacks() {
+        let adb_on = conf.contains("bst.enable_adb_access=\"1\"");
+        for (instance, name, port) in bluestacks_instances(&conf) {
+            let serial = format!("127.0.0.1:{port}");
+            // Connecting succeeds only while that instance runs with ADB on.
+            let running = adb_on && output(&adb, &["connect", &serial]).is_ok_and(|o| o.contains("connected"));
+            ld_serials.push(serial.clone());
+            out.push(Target {
+                id: format!("bs:{serial}"),
+                name,
+                kind: "bluestacks".into(),
+                running,
+                adb_enabled: Some(adb_on),
+                detail: format!("BlueStacks instance {instance}"),
+            });
+        }
+    }
     if let Some(adb) = general_adb() {
         for line in output(&adb, &["devices", "-l"]).unwrap_or_default().lines().skip(1) {
             let mut words = line.split_whitespace();
@@ -194,6 +253,27 @@ fn ready(target: &str, progress: &mut impl FnMut(&str)) -> Result<Adb, String> {
             output(&ld.console, &["launch", "--index", &idx])?;
         }
         let adb = Adb { exe: ld.dir.join("adb.exe"), serial: format!("emulator-{}", 5554 + 2 * index) };
+        wait_for_boot(&adb, progress)?;
+        Ok(adb)
+    } else if let Some(serial) = target.strip_prefix("bs:") {
+        let (exe, conf) = bluestacks().ok_or("BlueStacks wasn't found.")?;
+        if !conf.contains("bst.enable_adb_access=\"1\"") {
+            return Err("BlueStacks' Android Debug Bridge is off. Turn it on in BlueStacks: Settings → Advanced → Android Debug Bridge, then try again.".into());
+        }
+        let adb = Adb { exe, serial: serial.into() };
+        if !adb.online() {
+            progress("Starting BlueStacks");
+            if let Some(player) = crate::toolbox::detect_bluestacks() {
+                let _ = Command::new(player).spawn();
+            }
+            let deadline = Instant::now() + Duration::from_secs(120);
+            while output(&adb.exe, &["connect", serial]).map_or(true, |o| !o.contains("connected")) {
+                if Instant::now() > deadline {
+                    return Err("BlueStacks didn't start within 2 minutes.".into());
+                }
+                sleep(Duration::from_secs(2));
+            }
+        }
         wait_for_boot(&adb, progress)?;
         Ok(adb)
     } else if let Some(serial) = target.strip_prefix("adb:") {
@@ -294,6 +374,9 @@ fn adb_for(target: &str) -> Result<Adb, String> {
         let index: u32 = index.parse().map_err(|_| "Unknown target.")?;
         let ld = ldplayer().ok_or("LDPlayer wasn't found.")?;
         Ok(Adb { exe: ld.dir.join("adb.exe"), serial: format!("emulator-{}", 5554 + 2 * index) })
+    } else if let Some(serial) = target.strip_prefix("bs:") {
+        let (exe, _) = bluestacks().ok_or("BlueStacks wasn't found.")?;
+        Ok(Adb { exe, serial: serial.into() })
     } else if let Some(serial) = target.strip_prefix("adb:") {
         Ok(Adb { exe: general_adb().ok_or("adb wasn't found.")?, serial: serial.into() })
     } else {
@@ -354,6 +437,17 @@ pub fn adb_endpoint(target: &str) -> Result<(PathBuf, String), String> {
     Ok((adb.exe, adb.serial))
 }
 
+/// Android's list of the views on screen (`uiautomator dump`), as XML.
+pub fn ui_dump(target: &str) -> Result<String, String> {
+    let adb = adb_for(target)?;
+    let file = "/data/local/tmp/gamex-ui.xml";
+    let text = adb.shell(&format!("uiautomator dump {file} >/dev/null 2>&1; cat {file}; rm -f {file}"))?;
+    match text.find("<hierarchy") {
+        Some(i) => Ok(text[i..].to_string()),
+        None => Err("Android couldn't list the views on screen right now (this happens while a screen keeps animating). Try again in a moment.".into()),
+    }
+}
+
 pub fn stop(target: &str, package: &str) -> Result<(), String> {
     adb_for(target)?.shell(&format!("am force-stop {package}")).map(|_| ())
 }
@@ -377,6 +471,23 @@ mod tests {
         // Last key without a trailing comma.
         let last = with_adb_enabled("{\"a\": 1, \"basicSettings.adbDebug\": 0}").unwrap();
         assert_eq!(serde_json::from_str::<serde_json::Value>(&last).unwrap()["basicSettings.adbDebug"], 1);
+    }
+
+    #[test]
+    fn reads_bluestacks_instances() {
+        let conf = "bst.enable_adb_access=\"1\"\n\
+bst.instance.Pie64.adb_port=\"5555\"\n\
+bst.instance.Pie64.display_name=\"BlueStacks App Player\"\n\
+bst.instance.Pie64_1.status.adb_port=\"5565\"\n\
+bst.instance.Nougat32.display_name=\"Old\"\n";
+        let got = bluestacks_instances(conf);
+        assert_eq!(
+            got,
+            [
+                ("Pie64".to_string(), "BlueStacks App Player".to_string(), 5555),
+                ("Pie64_1".to_string(), "Pie64_1".to_string(), 5565)
+            ]
+        );
     }
 
     #[test]

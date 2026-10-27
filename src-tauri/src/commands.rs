@@ -755,6 +755,39 @@ pub async fn live_set(
         .map_err(|e| e.to_string())?
 }
 
+/// Where the live objects of these classes are, for the picker.
+#[tauri::command]
+pub async fn live_positions(
+    state: State<'_, AppState>,
+    id: String,
+    classes: Vec<String>,
+) -> Result<Vec<crate::live::LivePosition>, String> {
+    let lives = state.lives.clone();
+    tauri::async_runtime::spawn_blocking(move || with_live(&lives, &id, |s| s.positions(&classes, 400).map_err(|e| e.to_string())))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// The Android view under a point of the running game's screen (device
+/// pixels), with the layout file declaring it when there is one.
+#[tauri::command]
+pub async fn ui_pick(state: State<'_, AppState>, id: String, x: i32, y: i32) -> Result<Option<crate::uiview::UiNode>, String> {
+    let launched = state.runs.lock().unwrap().get(&id).cloned().ok_or("Start the game with Run first.")?;
+    let unpacked = state.workspace().project_dir(&id).map_err(|e| e.to_string())?.join("unpacked");
+    tauri::async_runtime::spawn_blocking(move || {
+        let xml = crate::device::ui_dump(&launched.target)?;
+        let nodes = crate::uiview::parse_dump(&xml);
+        Ok(crate::uiview::view_at(&nodes, x, y, &launched.package).map(|mut node| {
+            if !node.resource_id.is_empty() {
+                node.layout = crate::uiview::find_layout(&unpacked, &node.resource_id);
+            }
+            node
+        }))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 // ---------------------------------------------------------------------------
 // Optional tools (Settings → Tools)
 

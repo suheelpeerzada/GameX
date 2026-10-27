@@ -1,5 +1,5 @@
 import { Channel } from "@tauri-apps/api/core";
-import { ArrowLeft, Circle, MonitorPlay, MonitorStop } from "lucide-react";
+import { ArrowLeft, Circle, Crosshair, MonitorPlay, MonitorStop } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { api } from "../lib/api";
 
@@ -11,18 +11,66 @@ interface Setup {
   deviceHeight: number;
 }
 
+/** An object drawn over the screen in pick mode, in device pixels. */
+export interface PickMarker {
+  key: string;
+  x: number;
+  y: number;
+  label: string;
+  state?: "hover" | "selected";
+}
+
+/** Pick mode: hovering and clicking find things instead of touching the game. */
+export interface PickMode {
+  active: boolean;
+  markers: PickMarker[];
+  /** A highlighted view's bounds (left, top, right, bottom). */
+  box?: [number, number, number, number] | null;
+  onToggle: () => void;
+  onMove: (p: { x: number; y: number } | null) => void;
+  onPick: (p: { x: number; y: number }) => void;
+}
+
 /**
  * The running game's screen, streamed from the emulator (H.264 decoded with
  * WebCodecs). Clicks, drags and long presses on it are sent back as touches.
  */
 /** `visible`: stream only while the Live tab is on screen. */
-export default function GameScreen({ projectId, visible }: { projectId: string; visible: boolean }) {
+export default function GameScreen({ projectId, visible, pick }: { projectId: string; visible: boolean; pick?: PickMode }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [setup, setSetup] = useState<Setup | null>(null);
   const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const press = useRef<{ x: number; y: number; t: number } | null>(null);
   const setupRef = useRef<Setup | null>(null);
+  // Where the canvas sits in its box, for the pick overlay.
+  const [canvasBox, setCanvasBox] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
+  const picking = !!pick?.active;
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const measure = () =>
+      setCanvasBox({ left: canvas.offsetLeft, top: canvas.offsetTop, width: canvas.offsetWidth, height: canvas.offsetHeight });
+    const observer = new ResizeObserver(measure);
+    observer.observe(canvas);
+    measure();
+    return () => observer.disconnect();
+  }, [setup]);
+
+  // Ctrl+Shift+C toggles pick mode, as in a browser's developer tools.
+  const togglePick = pick?.onToggle;
+  useEffect(() => {
+    if (!visible || !togglePick) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === "c") {
+        e.preventDefault();
+        togglePick();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [visible, togglePick]);
 
   const stop = () => {
     api.mirrorStop(projectId);
@@ -129,6 +177,7 @@ export default function GameScreen({ projectId, visible }: { projectId: string; 
   };
 
   const onDown = (e: React.PointerEvent) => {
+    if (picking) return;
     const p = toDevice(e);
     if (!p) return;
     (e.target as Element).setPointerCapture(e.pointerId);
@@ -136,6 +185,11 @@ export default function GameScreen({ projectId, visible }: { projectId: string; 
   };
 
   const onUp = (e: React.PointerEvent) => {
+    if (picking) {
+      const p = toDevice(e);
+      if (p) pick!.onPick(p);
+      return;
+    }
     const start = press.current;
     press.current = null;
     const end = toDevice(e);
@@ -151,6 +205,16 @@ export default function GameScreen({ projectId, visible }: { projectId: string; 
       <div className="game-screen-head">
         <strong>Game</strong>
         <span className="status-spacer" />
+        {pick && (
+          <button
+            className={picking ? "icon-button small-icon active" : "icon-button small-icon"}
+            title="Select an element in the game to inspect it (Ctrl+Shift+C)"
+            onClick={pick.onToggle}
+            disabled={!setup}
+          >
+            <Crosshair size={15} />
+          </button>
+        )}
         <button className="icon-button small-icon" title="Back" onClick={() => api.mirrorKey(projectId, 4).catch(() => {})}>
           <ArrowLeft size={15} />
         </button>
@@ -170,19 +234,53 @@ export default function GameScreen({ projectId, visible }: { projectId: string; 
       <div className="game-screen-body">
         <canvas
           ref={canvasRef}
-          className="game-canvas"
+          className={picking ? "game-canvas picking" : "game-canvas"}
           width={setup?.width ?? 360}
           height={setup?.height ?? 640}
           onPointerDown={onDown}
           onPointerUp={onUp}
           onPointerCancel={() => (press.current = null)}
+          onPointerMove={picking ? (e) => pick!.onMove(toDevice(e)) : undefined}
+          onPointerLeave={picking ? () => pick!.onMove(null) : undefined}
           style={setup ? { aspectRatio: `${setup.width} / ${setup.height}` } : undefined}
         />
+        {picking && setup && canvasBox && (
+          <svg
+            className="pick-overlay"
+            style={canvasBox}
+            viewBox={`0 0 ${setup.deviceWidth} ${setup.deviceHeight}`}
+            preserveAspectRatio="none"
+          >
+            {pick!.box && (
+              <rect
+                className="pick-box"
+                x={pick!.box[0]}
+                y={pick!.box[1]}
+                width={pick!.box[2] - pick!.box[0]}
+                height={pick!.box[3] - pick!.box[1]}
+              />
+            )}
+            {pick!.markers
+              .filter((m) => m.x >= -20 && m.y >= -20 && m.x <= setup.deviceWidth + 20 && m.y <= setup.deviceHeight + 20)
+              .map((m) => (
+                <g key={m.key} className={m.state ? `pick-marker ${m.state}` : "pick-marker"}>
+                  <circle cx={m.x} cy={m.y} r={m.state ? 22 : 12} />
+                  {m.state && (
+                    <text x={m.x} y={m.y - 32} fontSize={setup.deviceWidth / 26}>
+                      {m.label}
+                    </text>
+                  )}
+                </g>
+              ))}
+          </svg>
+        )}
         {!setup && !error && <div className="game-screen-note muted small">Starting the screen…</div>}
         {error && <div className="game-screen-note small error-text">{error}</div>}
       </div>
       <div className="muted tiny game-screen-tip">
-        Click to tap, drag to swipe, hold for a long press. The screen updates when the game draws something new.
+        {picking
+          ? "Pick mode: hover to find objects, click to select one. Taps aren't sent to the game (Ctrl+Shift+C to leave)."
+          : "Click to tap, drag to swipe, hold for a long press. The screen updates when the game draws something new."}
       </div>
     </div>
   );

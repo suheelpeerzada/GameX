@@ -1178,6 +1178,17 @@ pre.code { line-height: 1.5; }
 .game-canvas { max-width: 100%; max-height: 100%; width: auto; height: 100%; background: #000; cursor: pointer; touch-action: none; }
 .game-screen-note { position: absolute; left: 12px; right: 12px; bottom: 12px; padding: 6px 8px; border-radius: 6px; background: rgba(0, 0, 0, 0.7); }
 .game-screen-tip { padding: 6px 10px; border-top: 1px solid var(--border); }
+.game-canvas.picking { cursor: crosshair; }
+.icon-button.active { background: var(--accent-soft); color: var(--accent); }
+.pick-overlay { position: absolute; pointer-events: none; overflow: visible; }
+.pick-overlay .pick-box { fill: rgba(99, 160, 255, 0.25); stroke: #63a0ff; stroke-width: 2; vector-effect: non-scaling-stroke; }
+.pick-marker circle { fill: rgba(255, 196, 0, 0.25); stroke: #ffc400; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.pick-marker.hover circle { fill: rgba(99, 160, 255, 0.35); stroke: #63a0ff; stroke-width: 2.5; }
+.pick-marker.selected circle { fill: rgba(80, 220, 120, 0.3); stroke: #50dc78; stroke-width: 2.5; }
+.pick-marker text { fill: #fff; text-anchor: middle; paint-order: stroke; stroke: #000; stroke-width: 4px; font-weight: 600; }
+.pick-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 0 0 8px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
+.pick-bar .grow { flex: 1; min-width: 200px; }
+.pick-hit { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; margin-top: 6px; }
 
 /* Header: the name shortens instead of wrapping in narrow windows */
 .project-identity { flex: 1; min-width: 0; }

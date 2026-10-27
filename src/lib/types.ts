@@ -43,7 +43,7 @@ export interface RunTarget {
   /** "ld:<index>" or "adb:<serial>". */
   id: string;
   name: string;
-  kind: "ldplayer" | "device";
+  kind: "ldplayer" | "bluestacks" | "device";
   running: boolean;
   adbEnabled: boolean | null;
   detail: string;
@@ -96,6 +96,28 @@ export interface LiveField {
   value: string;
   editable: boolean;
   isStatic: boolean;
+}
+
+/** Where a live object is, in the game's own coordinates. */
+export interface LivePosition {
+  object: string;
+  class: string;
+  x: number;
+  y: number;
+}
+
+/** An Android view on the game's screen. */
+export interface UiNode {
+  class: string;
+  resourceId: string;
+  text: string;
+  description: string;
+  package: string;
+  bounds: [number, number, number, number];
+  /** The game draws here itself; there's no view to edit. */
+  surface: boolean;
+  /** The layout file declaring it, relative to the unpacked folder. */
+  layout: string | null;
 }
 
 export interface LiveObject {

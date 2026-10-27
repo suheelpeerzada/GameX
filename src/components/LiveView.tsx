@@ -1,10 +1,31 @@
-import { Activity, Link2, Link2Off, Play, RefreshCw, Search } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Activity, Crosshair, Link2, Link2Off, Play, RefreshCw, Search } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../lib/api";
 import { categories } from "../lib/categories";
-import type { Category, GameObject, LiveClassCount, LiveField, LiveInstance, LiveObject } from "../lib/types";
+import { type Calibration, type CalibrationPoint, nearest, solveCalibration, toScreen } from "../lib/picker";
+import type { Category, GameObject, LiveClassCount, LiveField, LiveInstance, LiveObject, LivePosition, UiNode } from "../lib/types";
 import { CategoryIcon } from "../lib/visuals";
-import GameScreen from "./GameScreen";
+import GameScreen, { type PickMarker, type PickMode } from "./GameScreen";
+
+interface Calibrated {
+  calibration: Calibration | null;
+  points: CalibrationPoint[];
+}
+
+const calibrationKey = (projectId: string) => `gamex.pick.${projectId}`;
+
+function loadCalibration(projectId: string): Calibrated {
+  try {
+    const saved = JSON.parse(localStorage.getItem(calibrationKey(projectId)) ?? "null");
+    if (saved && typeof saved === "object") return { calibration: saved.calibration ?? null, points: [] };
+  } catch {
+    // Nothing saved, or storage is off.
+  }
+  return { calibration: null, points: [] };
+}
+
+/** How close (device pixels) the pointer must be to an object to hit it. */
+const PICK_RADIUS = 70;
 
 interface Props {
   projectId: string;
@@ -34,6 +55,16 @@ export default function LiveView({ projectId, objects, onOpenObject, onRun, visi
   const [object, setObject] = useState<LiveObject | null>(null);
   const [filter, setFilter] = useState("");
   const [showStatic, setShowStatic] = useState(false);
+
+  // The picker: hover/click on the game's screen to find what's there.
+  const [picking, setPicking] = useState(false);
+  const [positions, setPositions] = useState<LivePosition[]>([]);
+  const [pointer, setPointer] = useState<{ x: number; y: number } | null>(null);
+  const [calibrated, setCalibrated] = useState<Calibrated>(() => loadCalibration(projectId));
+  const [calibrating, setCalibrating] = useState(false);
+  const [uiHit, setUiHit] = useState<UiNode | null>(null);
+  const [pickNote, setPickNote] = useState<string | null>(null);
+  const positionsBusy = useRef(false);
 
   // The game's own classes (not libraries), grouped by category.
   const classes = useMemo(
@@ -66,6 +97,7 @@ export default function LiveView({ projectId, objects, onOpenObject, onRun, visi
     setConnected(null);
     setInstances([]);
     setObject(null);
+    setPositions([]);
   };
 
   const refreshCounts = useCallback(async () => {
@@ -120,6 +152,195 @@ export default function LiveView({ projectId, objects, onOpenObject, onRun, visi
     return () => window.clearInterval(timer);
   }, [connected, autoRefresh, refreshCounts, refreshObject]);
 
+  // While picking, where the live objects are (about once a second). Setup
+  // and helper classes (Core, Code) are left out: they aren't on screen.
+  const liveClasses = useMemo(
+    () =>
+      classes
+        .filter((c) => c.category !== "core" && c.category !== "code")
+        .map((c) => c.id.slice("class:".length))
+        .filter((c) => (counts[c] ?? 0) > 0),
+    [classes, counts],
+  );
+  useEffect(() => {
+    if (!connected || !picking || !visible) return;
+    const tick = async () => {
+      if (positionsBusy.current) return;
+      positionsBusy.current = true;
+      try {
+        setPositions(await api.livePositions(projectId, liveClasses));
+      } catch (e) {
+        fail(e);
+      } finally {
+        positionsBusy.current = false;
+      }
+    };
+    tick();
+    const timer = window.setInterval(tick, 1000);
+    return () => window.clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connected, picking, visible, projectId, liveClasses]);
+
+  const saveCalibration = (next: Calibrated) => {
+    setCalibrated(next);
+    try {
+      localStorage.setItem(calibrationKey(projectId), JSON.stringify({ calibration: next.calibration }));
+    } catch {
+      // Not remembered across restarts; still works now.
+    }
+  };
+
+  const calibration = calibrated.calibration;
+  const markers: (PickMarker & { position: LivePosition })[] = useMemo(() => {
+    if (!calibration) return [];
+    // An object at exactly 0,0 is almost always one not placed yet.
+    return positions.filter((p) => p.x !== 0 || p.y !== 0).map((p) => ({
+      ...toScreen(calibration, p.x, p.y),
+      key: p.object,
+      label: `${p.class.split(".").pop()} #${p.object}`,
+      position: p,
+    }));
+  }, [positions, calibration]);
+  const hovered = pointer && !calibrating ? nearest(markers, pointer, PICK_RADIUS) : -1;
+  const selectedPosition = positions.find((p) => p.object === selectedObject);
+
+  const startCalibrating = () => {
+    setCalibrating(true);
+    setCalibrated((c) => ({ ...c, points: [] }));
+    setUiHit(null);
+    setPickNote(null);
+  };
+
+  const onPick = async (p: { x: number; y: number }) => {
+    setPickNote(null);
+    // Lining up: asked for, or the first click with a placed object selected.
+    if (connected && (calibrating || (!calibration && selectedPosition))) {
+      if (!selectedPosition) {
+        setPickNote(
+          selectedObject
+            ? "This object has no position fields GameX recognizes (like x/y). Pick another object, one you can see on screen."
+            : "First pick an object in the Objects list (one you can see on screen), then click where it is on the game.",
+        );
+        return;
+      }
+      const points = [...calibrated.points, { wx: selectedPosition.x, wy: selectedPosition.y, sx: p.x, sy: p.y }].slice(-6);
+      const solved = solveCalibration(points, calibration);
+      saveCalibration({ calibration: solved ?? calibration, points });
+      if (solved && (points.length >= 2 || calibration)) {
+        setCalibrating(false);
+        setPickNote("Lined up. Hover over the game to find its objects; click one to inspect it.");
+      } else {
+        setPickNote("Got it. Now pick a different object, somewhere else on screen, and click where it is.");
+      }
+      return;
+    }
+    if (connected && hovered >= 0) {
+      const hit = markers[hovered].position;
+      setUiHit(null);
+      setSelectedClass(hit.class);
+      setSelectedObject(hit.object);
+      return;
+    }
+    try {
+      const node = await api.uiPick(projectId, p.x, p.y);
+      setUiHit(node);
+      if (!node) setPickNote("Nothing on screen there.");
+      else if (node.surface)
+        setPickNote(
+          connected
+            ? "No game object here (or its position isn't known). The game draws this area itself."
+            : "The game draws this area itself. Connect to the running game to find the objects in it.",
+        );
+    } catch (e) {
+      setPickNote(String(e));
+    }
+  };
+
+  const pick: PickMode = {
+    active: picking,
+    markers: markers.map((m, i) => ({
+      key: m.key,
+      x: m.x,
+      y: m.y,
+      label: m.label,
+      state: i === hovered ? "hover" : m.key === selectedObject ? "selected" : undefined,
+    })),
+    box: uiHit && !uiHit.surface ? uiHit.bounds : null,
+    onToggle: () => {
+      setPicking((on) => !on);
+      setPointer(null);
+    },
+    onMove: setPointer,
+    onPick,
+  };
+
+  const layoutObject = uiHit?.layout
+    ? objects.find((o) => o.sourceFiles.some((f) => f === uiHit.layout || uiHit.layout!.endsWith(f) || f.endsWith(uiHit.layout!.replace(/^apktool\//, ""))))
+    : undefined;
+
+  const pickPanel = picking && (
+    <div className="pick-bar">
+      <Crosshair size={15} />
+      <div className="grow small">
+        {pickNote ??
+          (connected && calibrating
+            ? "Line up the game's coordinates with the screen: pick an object you can see in the Objects list, then click where it is on the game. Do this for two objects in different spots."
+            : connected && !calibration
+              ? "Click a button, text or image to see which view it is. To point at the game's own objects (characters, items...), line them up with the screen first."
+              : connected
+              ? `Hover over the game to find its objects (${markers.length} with a known position); click one to inspect it. Buttons and other views can be clicked too.`
+              : "Click a button, text or image on the game to see which view it is and where it's declared.")}
+        {uiHit && (
+          <div className="pick-hit">
+            <span className="muted">View</span>
+            <span className="mono">{uiHit.class.split(".").pop()}</span>
+            {uiHit.resourceId && (
+              <>
+                <span className="muted">ID</span>
+                <span className="mono">{uiHit.resourceId.split("/").pop()}</span>
+              </>
+            )}
+            {(uiHit.text || uiHit.description) && (
+              <>
+                <span className="muted">Text</span>
+                <span>{uiHit.text || uiHit.description}</span>
+              </>
+            )}
+            {!uiHit.surface && (
+              <>
+                <span className="muted">Declared in</span>
+                <span>
+                  {layoutObject ? (
+                    <button className="link" onClick={() => onOpenObject(layoutObject.id)}>
+                      {uiHit.layout}
+                    </button>
+                  ) : (
+                    <span className="muted">{uiHit.layout ?? "made in code, not in a layout file"}</span>
+                  )}
+                </span>
+              </>
+            )}
+          </div>
+        )}
+      </div>
+      {connected && !calibration && !calibrating && (
+        <button className="small" onClick={startCalibrating}>
+          Line up objects
+        </button>
+      )}
+      {connected && calibration && !calibrating && (
+        <button className="small" onClick={startCalibrating} title="Use this if the markers don't sit on the objects (for example after the camera moved)">
+          Line up again
+        </button>
+      )}
+      {connected && calibrating && (
+        <button className="small" onClick={() => { setCalibrating(false); setPickNote(null); }}>
+          Cancel
+        </button>
+      )}
+    </div>
+  );
+
   const byCategory = useMemo(() => {
     const groups = new Map<Category, GameObject[]>();
     for (const c of classes) {
@@ -138,8 +359,9 @@ export default function LiveView({ projectId, objects, onOpenObject, onRun, visi
   if (!connected) {
     return (
       <div className="live-split">
-        <GameScreen projectId={projectId} visible={visible} />
+        <GameScreen projectId={projectId} visible={visible} pick={pick} />
       <div className="live-empty">
+        {pickPanel}
         <Activity size={28} className="ai-mark" />
         <h2>Live editing</h2>
         <p className="muted">
@@ -162,7 +384,7 @@ export default function LiveView({ projectId, objects, onOpenObject, onRun, visi
 
   return (
     <div className="live-split">
-      <GameScreen projectId={projectId} visible={visible} />
+      <GameScreen projectId={projectId} visible={visible} pick={pick} />
     <div className="live">
       <div className="live-bar">
         <span className="status-dot ok" />
@@ -188,6 +410,7 @@ export default function LiveView({ projectId, objects, onOpenObject, onRun, visi
         </div>
       )}
 
+      {pickPanel}
       <div className="live-columns">
         <section className="live-col">
           <div className="live-col-head">

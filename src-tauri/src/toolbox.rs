@@ -134,6 +134,16 @@ pub const CATALOG: &[ToolSpec] = &[
         entry: "ldconsole.exe",
     },
     ToolSpec {
+        id: "bluestacks",
+        name: "BlueStacks",
+        description: "An Android emulator for Windows. Install it from its website and turn on \"Android Debug Bridge\" in its settings; GameX finds it automatically.",
+        used_for: "running games",
+        homepage: "https://www.bluestacks.com/",
+        size: "installer from the website",
+        source: Source::External { detect: detect_bluestacks },
+        entry: "HD-Player.exe",
+    },
+    ToolSpec {
         id: "android-emulator",
         name: "Android Emulator (Google)",
         description: "Google's official emulator, with instant save-state snapshots. It comes with Android Studio; GameX finds it automatically.",
@@ -163,6 +173,15 @@ fn detect_ldplayer() -> Option<PathBuf> {
             .chain(std::iter::once(root.join("ldconsole.exe")))
             .find(|p| p.is_file())
     })
+}
+
+/// BlueStacks 5 (`BlueStacks_nxt`): the player in Program Files.
+pub fn detect_bluestacks() -> Option<PathBuf> {
+    ["ProgramFiles", "ProgramFiles(x86)"]
+        .iter()
+        .filter_map(std::env::var_os)
+        .map(|p| PathBuf::from(p).join("BlueStacks_nxt").join("HD-Player.exe"))
+        .find(|p| p.is_file())
 }
 
 fn detect_google_emulator() -> Option<PathBuf> {

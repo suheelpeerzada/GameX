@@ -64,6 +64,86 @@ pub struct LiveObject {
     pub fields: Vec<LiveField>,
 }
 
+/// Where a live object is, in the game's own coordinates.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LivePosition {
+    pub object: String,
+    pub class: String,
+    pub x: f64,
+    pub y: f64,
+}
+
+/// Words that make an x/y pair something other than a position.
+const NOT_POSITION_WORDS: &[&str] = &[
+    "speed", "vel", "velocity", "dir", "direction", "scale", "size", "max", "min", "acc", "accel", "delta", "offset", "old",
+    "last", "prev", "start", "target", "dest", "spawn", "init", "initial", "origin", "home", "v", "d", "sp", "force",
+    "push", "knock", "jump", "move", "step", "flip", "count", "num", "len", "length", "s", "ratio", "zoom", "factor", "mult", "multiplier", "coef", "pivot", "anchor", "center", "centre", "half",
+];
+
+/// camelCase / snake_case words, lowercased.
+fn name_words(name: &str) -> Vec<String> {
+    let mut words: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for c in name.chars() {
+        if c == '_' || c.is_ascii_digit() {
+            if !current.is_empty() {
+                words.push(std::mem::take(&mut current));
+            }
+            continue;
+        }
+        if c.is_uppercase() && !current.is_empty() {
+            words.push(std::mem::take(&mut current));
+        }
+        current.push(c.to_ascii_lowercase());
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    words
+}
+
+/// The two fields holding an object's position, from `(name, signature)`
+/// pairs: names that differ only by x/y (x/y, posX/posY, mX/mY, world_x...),
+/// both numbers. The plainest pair wins.
+pub fn position_pair(fields: &[(&str, &str)]) -> Option<(usize, usize)> {
+    let numeric = |sig: &str| matches!(sig, "I" | "F" | "D" | "J" | "S");
+    let mut best: Option<(usize, usize, usize)> = None;
+    for (i, (name, sig)) in fields.iter().enumerate() {
+        if !numeric(sig) {
+            continue;
+        }
+        for (p, c) in name.char_indices() {
+            let y = match c {
+                'x' => 'y',
+                'X' => 'Y',
+                _ => continue,
+            };
+            let mut partner = name.to_string();
+            partner.replace_range(p..p + 1, &y.to_string());
+            let Some(j) = fields.iter().position(|(n, s)| *n == partner && numeric(s)) else { continue };
+            let mut rest = name.to_string();
+            rest.remove(p);
+            let words = name_words(&rest);
+            // Longer words also match as prefixes: `factorf`, `speeds`.
+            let not_position =
+                |w: &String| NOT_POSITION_WORDS.iter().any(|n| w == n || (n.len() >= 4 && w.starts_with(n)));
+            if words.iter().any(not_position) {
+                continue;
+            }
+            let score = match words.as_slice() {
+                [] => 0,
+                [w] if matches!(w.as_str(), "pos" | "position" | "world" | "cur" | "current" | "m" | "loc" | "location") => 1,
+                _ => 2 + rest.len(),
+            };
+            if best.is_none_or(|(_, _, s)| score < s) {
+                best = Some((i, j, score));
+            }
+        }
+    }
+    best.map(|(i, j, _)| (i, j))
+}
+
 /// `com.x.Enemy` <-> `Lcom/x/Enemy;`
 fn signature_of(class: &str) -> String {
     format!("L{};", class.replace('.', "/"))
@@ -132,6 +212,48 @@ pub fn parse_input(sig: &str, text: &str) -> Result<Value, String> {
 }
 
 impl LiveSession {
+    /// Positions of the live objects of these classes (up to `max` objects in
+    /// all). Classes without position fields are left out.
+    pub fn positions(&mut self, classes: &[String], max: usize) -> io::Result<Vec<LivePosition>> {
+        let mut out = Vec::new();
+        for class in classes {
+            if out.len() >= max {
+                break;
+            }
+            let Some(type_id) = self.class_id(class)? else { continue };
+            let fields: Vec<FieldInfo> = self.fields_of(type_id)?.into_iter().filter(|f| !f.is_static).collect();
+            let named: Vec<(&str, &str)> = fields.iter().map(|f| (f.name.as_str(), f.signature.as_str())).collect();
+            let Some((xi, yi)) = position_pair(&named) else { continue };
+            let pair = [&fields[xi], &fields[yi]];
+            for object in self.instance_ids(type_id, (max - out.len()) as u32)? {
+                let values = self.values(object, type_id, &pair)?;
+                let number = |v: &Value| match v {
+                    Value::Int(n) => Some(*n as f64),
+                    Value::Float(f) => Some(*f),
+                    _ => None,
+                };
+                if let (Some(x), Some(y)) = (number(&values[0].1), number(&values[1].1)) {
+                    out.push(LivePosition { object: object.to_string(), class: class.clone(), x, y });
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    fn instance_ids(&mut self, type_id: u64, max: u32) -> io::Result<Vec<u64>> {
+        let mut w = self.vm.writer();
+        w.reference_type(type_id).u32(max);
+        let data = self.vm.command(2, 16, &w.data)?;
+        let mut r = self.vm.reader(&data);
+        let n = r.u32()?;
+        let mut objects = Vec::new();
+        for _ in 0..n {
+            r.u8()?;
+            objects.push(r.object()?);
+        }
+        Ok(objects)
+    }
+
     pub fn new(vm: Jdwp, target: String, package: String, pid: u32) -> Self {
         LiveSession { vm, target, package, pid, classes: HashMap::new(), fields: HashMap::new() }
     }
@@ -316,16 +438,7 @@ impl LiveSession {
     /// Live objects of one class, each with a one-line summary.
     pub fn instances(&mut self, class: &str, max: u32) -> io::Result<Vec<LiveInstance>> {
         let Some(type_id) = self.class_id(class)? else { return Ok(Vec::new()) };
-        let mut w = self.vm.writer();
-        w.reference_type(type_id).u32(max);
-        let data = self.vm.command(2, 16, &w.data)?;
-        let mut r = self.vm.reader(&data);
-        let n = r.u32()?;
-        let mut objects = Vec::new();
-        for _ in 0..n {
-            r.u8()?;
-            objects.push(r.object()?);
-        }
+        let objects = self.instance_ids(type_id, max)?;
         let fields = self.fields_of(type_id)?;
         let summary_fields: Vec<&FieldInfo> = fields
             .iter()
@@ -430,5 +543,22 @@ mod tests {
         assert_eq!(parse_input("C", "x"), Ok(Value::Char('x')));
         assert!(parse_input("Lcom/g/Enemy;", "x").is_err());
         assert_eq!(trim_number("3.14159"), "3.14");
+    }
+
+    #[test]
+    fn finds_position_fields_by_name() {
+        let pick = |f: &[(&str, &str)]| position_pair(f).map(|(i, j)| (f[i].0.to_string(), f[j].0.to_string()));
+        let pair = |a: &str, b: &str| Some((a.to_string(), b.to_string()));
+        assert_eq!(pick(&[("speedX", "F"), ("speedY", "F"), ("x", "F"), ("y", "F")]), pair("x", "y"));
+        assert_eq!(pick(&[("vx", "I"), ("vy", "I"), ("posX", "I"), ("posY", "I")]), pair("posX", "posY"));
+        assert_eq!(pick(&[("mX", "D"), ("mY", "D"), ("tileX", "I"), ("tileY", "I")]), pair("mX", "mY"));
+        assert_eq!(pick(&[("world_x", "F"), ("world_y", "F")]), pair("world_x", "world_y"));
+        assert_eq!(pick(&[("tileX", "I"), ("tileY", "I")]), pair("tileX", "tileY"));
+        // Not positions: velocities, sizes, start points, non-numbers, no partner.
+        assert_eq!(pick(&[("dx", "I"), ("dy", "I"), ("maxX", "I"), ("maxY", "I"), ("startX", "F"), ("startY", "F")]), None);
+        assert_eq!(pick(&[("x", "Ljava/lang/String;"), ("y", "Ljava/lang/String;")]), None);
+        assert_eq!(pick(&[("x", "I"), ("height", "I")]), None);
+        assert_eq!(pick(&[("sx", "F"), ("sy", "F"), ("ratioX", "F"), ("ratioY", "F"), ("trFactorX", "D"), ("trFactorY", "D"), ("trFactorXf", "F"), ("trFactorYf", "F")]), None);
+        assert_eq!(name_words("mPos_x2Abc"), ["m", "pos", "x", "abc"]);
     }
 }

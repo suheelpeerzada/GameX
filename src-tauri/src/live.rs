@@ -49,6 +49,10 @@ pub struct LiveField {
     pub field_id: String,
     pub name: String,
     pub declared_in: String,
+    /// The declaring class's full name (`com.g.Actor`).
+    pub owner: String,
+    /// JVM signature (`I`, `Ljava/lang/String;`...).
+    pub signature: String,
     /// "int", "float", "boolean", "String", "Enemy"...
     pub type_name: String,
     pub value: String,
@@ -345,7 +349,6 @@ impl LiveSession {
             let data = self.vm.command(2, 4, &w.data)?;
             let mut r = self.vm.reader(&data);
             let n = r.u32()?;
-            let simple = class.rsplit('.').next().unwrap_or(&class).to_string();
             for _ in 0..n {
                 let id = r.field()?;
                 let name = r.string()?;
@@ -355,7 +358,7 @@ impl LiveSession {
                 if modifiers & 0xF000_0000 != 0 || name.contains('$') {
                     continue;
                 }
-                all.push(FieldInfo { id, name, signature, is_static: modifiers & 0x0008 != 0, declared_in: simple.clone() });
+                all.push(FieldInfo { id, name, signature, is_static: modifiers & 0x0008 != 0, declared_in: class.clone() });
             }
             current = self.superclass(current)?;
         }
@@ -472,7 +475,9 @@ impl LiveSession {
             out.push(LiveField {
                 field_id: f.id.to_string(),
                 name: f.name.clone(),
-                declared_in: f.declared_in.clone(),
+                declared_in: f.declared_in.rsplit('.').next().unwrap_or(&f.declared_in).to_string(),
+                owner: f.declared_in.clone(),
+                signature: f.signature.clone(),
                 type_name: type_name(&f.signature),
                 value: self.display(tag, &v)?,
                 editable: f.signature.len() == 1 || f.signature == "Ljava/lang/String;",

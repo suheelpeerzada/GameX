@@ -1,9 +1,9 @@
-import { Activity, Crosshair, Eye, EyeOff, Link2, Link2Off, Play, RefreshCw, Search } from "lucide-react";
+import { Activity, Crosshair, Eye, EyeOff, Link2, Link2Off, Pin, Play, RefreshCw, Search } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../lib/api";
 import { categories } from "../lib/categories";
 import { type Calibration, type CalibrationPoint, classGroups, nearest, solveCalibration, toScreen } from "../lib/picker";
-import type { Category, GameObject, LiveClassCount, LiveField, LiveInstance, LiveObject, LivePosition, UiNode } from "../lib/types";
+import type { Category, EditState, GameObject, KeptChange, LiveClassCount, LiveField, LiveInstance, LiveObject, LivePosition, UiNode } from "../lib/types";
 import { CategoryIcon } from "../lib/visuals";
 import GameScreen, { type PickMarker, type PickMode } from "./GameScreen";
 
@@ -45,6 +45,10 @@ interface Props {
   /** Opens a class in the Content tab. */
   onOpenObject: (id: string) => void;
   onRun: () => void;
+  /** A live change was kept as an edit (or that edit undone). */
+  onEdited: (state: EditState) => void;
+  /** Opens the Build APK dialog. */
+  onBuild: () => void;
   /** Whether the Live tab is on screen. */
   visible: boolean;
 }
@@ -54,7 +58,7 @@ interface Props {
  * many objects of each are alive, the objects themselves, and their fields,
  * which can be changed while the game runs.
  */
-export default function LiveView({ projectId, objects, onOpenObject, onRun, visible }: Props) {
+export default function LiveView({ projectId, objects, onOpenObject, onRun, onEdited, onBuild, visible }: Props) {
   const [connected, setConnected] = useState<{ pid: number; package: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -67,6 +71,10 @@ export default function LiveView({ projectId, objects, onOpenObject, onRun, visi
   const [object, setObject] = useState<LiveObject | null>(null);
   const [filter, setFilter] = useState("");
   const [showStatic, setShowStatic] = useState(false);
+  // What was typed into each field changed this session (by field ID), so
+  // "Keep" keeps exactly that rather than the rounded value shown.
+  const [typed, setTyped] = useState<Record<string, string>>({});
+  const [kept, setKept] = useState<(KeptChange & { field: string; value: string; isStatic: boolean }) | null>(null);
 
   // The picker: hover/click on the game's screen to find what's there.
   const [picking, setPicking] = useState(false);
@@ -427,6 +435,35 @@ export default function LiveView({ projectId, objects, onOpenObject, onRun, visi
     return groups;
   }, [classes, counts, onlyLive]);
 
+  const keep = async (field: LiveField) => {
+    if (!object) return;
+    const value = typed[field.fieldId] ?? field.value;
+    try {
+      const result = await api.liveKeep(projectId, object.class, field, value);
+      setKept({ ...result, field: field.name, value, isStatic: field.isStatic });
+      setError(null);
+      onEdited(result.edits);
+    } catch (e) {
+      setKept(null);
+      setError(String(e));
+    }
+  };
+
+  const undoKeep = async () => {
+    if (!kept) return;
+    try {
+      // Only if it's still the latest change: Undo takes back the newest one.
+      if ((await api.getEditState(projectId)).undo !== kept.edits.undo) {
+        setError("Something else was changed after this. Revert the file in the Content tab instead.");
+        return;
+      }
+      onEdited(await api.undoEdit(projectId));
+      setKept(null);
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
   const totalLive = Object.values(counts).reduce<number>((n, c) => n + (c ?? 0), 0);
   const fields = (object?.fields ?? []).filter(
     (f) => (showStatic || !f.isStatic) && (!filter || f.name.toLowerCase().includes(filter.toLowerCase())),
@@ -487,6 +524,32 @@ export default function LiveView({ projectId, objects, onOpenObject, onRun, visi
       )}
 
       {pickPanel}
+      {kept && (
+        <div className="notice small live-kept">
+          <Pin size={14} />
+          <span className="grow">
+            Kept: {kept.isStatic ? "when the game starts, " : `every ${kept.class.split(".").pop()} the game makes now starts with `}
+            <span className="mono">
+              {kept.isStatic ? `${kept.class.split(".").pop()}.` : ""}
+              {kept.field} = {kept.value}
+            </span>
+            . Saved as an edit to <span className="mono">{kept.file.split("/").pop()}</span>
+            {kept.places > 1 ? ` (${kept.places} places)` : ""}; build the APK to play with it.
+          </span>
+          <button className="small" onClick={() => onOpenObject(`class:${kept.class}`)}>
+            Open source
+          </button>
+          <button className="small" onClick={undoKeep}>
+            Undo
+          </button>
+          <button className="small primary" onClick={onBuild}>
+            Build APK
+          </button>
+          <button className="link small" onClick={() => setKept(null)}>
+            Dismiss
+          </button>
+        </div>
+      )}
       <div className="live-columns">
         <section className="live-col">
           <div className="live-col-head">
@@ -581,9 +644,12 @@ export default function LiveView({ projectId, objects, onOpenObject, onRun, visi
                     <FieldRow
                       key={f.fieldId}
                       field={f}
+                      changed={f.fieldId in typed}
+                      onKeep={() => keep(f)}
                       onSet={async (value) => {
                         try {
                           const shown = await api.liveSet(projectId, object.id, f.fieldId, value);
+                          setTyped((t) => ({ ...t, [f.fieldId]: value }));
                           setObject((o) => o && { ...o, fields: o.fields.map((x) => (x.fieldId === f.fieldId ? { ...x, value: shown } : x)) });
                           setError(null);
                           return true;
@@ -601,15 +667,26 @@ export default function LiveView({ projectId, objects, onOpenObject, onRun, visi
         </section>
       </div>
       <p className="muted tiny live-note">
-        Changes apply to the running game immediately and last until the game restarts. To keep a change, edit the
-        class's smali (Open source) and rebuild.
+        Changes apply to the running game immediately and last until the game restarts. To keep one, use the pin
+        next to it: the game's code is changed to set that value, and the next Build APK includes it.
       </p>
     </div>
     </div>
   );
 }
 
-function FieldRow({ field, onSet }: { field: LiveField; onSet: (value: string) => Promise<boolean> }) {
+function FieldRow({
+  field,
+  changed,
+  onSet,
+  onKeep,
+}: {
+  field: LiveField;
+  /** Changed live this session: its Keep button is shown all the time. */
+  changed: boolean;
+  onSet: (value: string) => Promise<boolean>;
+  onKeep: () => void;
+}) {
   const [draft, setDraft] = useState<string | null>(null);
   const editing = draft !== null;
   const apply = async () => {
@@ -640,6 +717,21 @@ function FieldRow({ field, onSet }: { field: LiveField; onSet: (value: string) =
           />
         ) : (
           <span className="mono small muted">{field.value}</span>
+        )}
+      </td>
+      <td className="live-keep-cell">
+        {field.editable && (
+          <button
+            className={changed ? "icon-button live-keep changed" : "icon-button live-keep"}
+            onClick={onKeep}
+            title={
+              field.isStatic
+                ? `Keep this value: set ${field.name} to it every time the game starts (an undoable edit; build the APK to use it)`
+                : `Keep this value: every new object of this class starts with ${field.name} set to it (an undoable edit; build the APK to use it)`
+            }
+          >
+            <Pin size={13} />
+          </button>
         )}
       </td>
     </tr>

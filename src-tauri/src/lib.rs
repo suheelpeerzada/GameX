@@ -6,6 +6,7 @@ mod commands;
 pub mod edits;
 pub mod import;
 pub mod jdwp;
+pub mod keep;
 pub mod live;
 pub mod media;
 pub mod mirror;
@@ -83,6 +84,7 @@ pub fn run() {
             commands::live_object,
             commands::live_set,
             commands::live_positions,
+            commands::live_keep,
             commands::ui_pick,
             commands::tool_install,
             commands::tool_uninstall,

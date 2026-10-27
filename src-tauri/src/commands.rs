@@ -755,6 +755,38 @@ pub async fn live_set(
         .map_err(|e| e.to_string())?
 }
 
+/// What "Keep this change" did, with the project's edits afterwards.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeptChange {
+    #[serde(flatten)]
+    pub kept: crate::keep::KeepResult,
+    pub edits: EditState,
+}
+
+/// Keeps a live change: the field gets `value` every time the game makes an
+/// object of `class` (or loads the class, for a static field), as an
+/// undoable edit to the class's smali. Doesn't need the game running.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub fn live_keep(
+    state: State<'_, AppState>,
+    id: String,
+    class: String,
+    owner: String,
+    field: String,
+    signature: String,
+    is_static: bool,
+    value: String,
+) -> Result<KeptChange, String> {
+    let dir = state.workspace().project_dir(&id).map_err(|e| e.to_string())?;
+    let store = state.edits(&id)?;
+    let field = crate::keep::KeepField { class: &class, owner: &owner, name: &field, signature: &signature, is_static };
+    let kept = crate::keep::keep(&dir, &store, &field, &value)?;
+    let edits = store.state().map_err(|e| e.to_string())?;
+    Ok(KeptChange { kept, edits })
+}
+
 /// Where the live objects of these classes are, for the picker.
 #[tauri::command]
 pub async fn live_positions(

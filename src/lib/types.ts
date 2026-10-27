@@ -92,6 +92,10 @@ export interface LiveField {
   fieldId: string;
   name: string;
   declaredIn: string;
+  /** The declaring class's full name. */
+  owner: string;
+  /** JVM signature (I, F, Ljava/lang/String;...). */
+  signature: string;
   typeName: string;
   value: string;
   editable: boolean;
@@ -407,4 +411,15 @@ export interface References {
   more: number;
   /** False for files that aren't Java/smali classes. */
   supported: boolean;
+}
+
+/** A live change kept as a smali edit. */
+export interface KeptChange {
+  /** The edited smali file, relative to the unpacked folder. */
+  file: string;
+  /** The class whose objects now start with the value. */
+  class: string;
+  /** How many constructors (or static initializers) set it. */
+  places: number;
+  edits: EditState;
 }

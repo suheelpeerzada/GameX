@@ -140,8 +140,13 @@ impl EditStore {
     }
 
     pub fn save_text(&self, rel: &str, text: &str) -> io::Result<()> {
+        self.save_text_as(rel, text, format!("Edit {}", file_name(rel)))
+    }
+
+    /// Saves a text edit with its own line in the undo history.
+    pub fn save_text_as(&self, rel: &str, text: &str, summary: String) -> io::Result<()> {
         self.check_editable(rel)?;
-        self.record(rel, format!("Edit {}", file_name(rel)))?;
+        self.record(rel, summary)?;
         self.write_edit(rel, text.as_bytes())
     }
 

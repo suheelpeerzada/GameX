@@ -520,6 +520,8 @@ export default function ProjectScreen({ project, active: shown, focus, onToggleF
             projectId={project.id}
             objects={analysis.objects}
             onOpenObject={openObject}
+            onEdited={onEdited}
+            onBuild={() => setBuilding(true)}
             visible={shown && tab === "live"}
             onRun={() => {
               setRunMounted(true);

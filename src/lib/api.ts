@@ -5,6 +5,8 @@ import type {
   AiStatus,
   Answer,
   BuildInfo,
+  KeptChange,
+  LiveField,
   ToolInfo,
   ToolProgress,
   RunOptions,
@@ -107,6 +109,16 @@ export const api = {
   liveObject: (id: string, object: string) => invoke<LiveObject>("live_object", { id, object }),
   liveSet: (id: string, object: string, field: string, value: string) =>
     invoke<string>("live_set", { id, object, field, value }),
+  liveKeep: (id: string, cls: string, field: LiveField, value: string) =>
+    invoke<KeptChange>("live_keep", {
+      id,
+      class: cls,
+      owner: field.owner,
+      field: field.name,
+      signature: field.signature,
+      isStatic: field.isStatic,
+      value,
+    }),
   livePositions: (id: string, classes: string[]) => invoke<LivePosition[]>("live_positions", { id, classes }),
   uiPick: (id: string, x: number, y: number) => invoke<UiNode | null>("ui_pick", { id, x, y }),
   onRunProgress: (handler: (p: ImportProgress) => void): Promise<UnlistenFn> =>

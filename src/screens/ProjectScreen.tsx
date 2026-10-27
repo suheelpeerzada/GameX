@@ -1,4 +1,5 @@
 import {
+  FolderOutput,
   Gamepad2,
   Hammer,
   Moon,
@@ -18,7 +19,7 @@ import AiPanel from "../components/AiPanel";
 import BuildDialog from "../components/BuildDialog";
 import CategoryTree from "../components/CategoryTree";
 import Inspector from "../components/Inspector";
-import { api, formatBytes } from "../lib/api";
+import { api, formatBytes, pickPath } from "../lib/api";
 import { statusLabel } from "../lib/categories";
 import { currentTheme, setTheme, type Theme } from "../lib/theme";
 import type { AiStatus, Category, EditState, GameObject, GameProject, ImportRecord, ModelInfo } from "../lib/types";
@@ -133,6 +134,18 @@ export default function ProjectScreen({ project, active: shown, focus, onToggleF
       onEdited(await api.undoEdit(project.id));
     } catch (e) {
       setError(`Couldn't undo: ${e}`);
+    }
+  };
+
+  // ZIP and folder imports: copy the files out with the edits applied.
+  const exportFolder = async () => {
+    const dest = await pickPath("folder");
+    if (!dest) return;
+    try {
+      const edited = await api.exportFiles(project.id, dest);
+      window.alert(`Exported to ${dest} with ${edited} edited file${edited === 1 ? "" : "s"}.`);
+    } catch (e) {
+      setError(String(e));
     }
   };
 
@@ -264,10 +277,19 @@ export default function ProjectScreen({ project, active: shown, focus, onToggleF
           <button className="icon-button" onClick={toggleTheme} title={theme === "dark" ? "Light theme" : "Dark theme"}>
             {theme === "dark" ? <Sun size={18} /> : <Moon size={18} />}
           </button>
-          {project.container === "apk" && (
+          {project.container === "apk" ? (
             <button className="primary build-button" onClick={() => setBuilding(true)}>
               <Hammer size={16} />
               Build APK
+            </button>
+          ) : (
+            <button
+              className="primary build-button"
+              onClick={exportFolder}
+              title="Copy the game's files, with your edits, into an empty folder"
+            >
+              <FolderOutput size={16} />
+              Export
             </button>
           )}
         </div>

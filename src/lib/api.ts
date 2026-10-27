@@ -14,6 +14,7 @@ import type {
   Proposal,
   References,
   MediaItem,
+  Scene,
   ValueChange,
   GameProject,
   ImportProgress,
@@ -50,6 +51,11 @@ export const api = {
   readPng: (path: string) => invoke<string>("read_png", { path }),
   getReferences: (id: string, path: string) => invoke<References>("get_references", { id, path }),
   scanMedia: (id: string, path: string) => invoke<MediaItem[]>("scan_media", { id, path }),
+  sceneLoad: (id: string, path: string) => invoke<Scene>("scene_load", { id, path }),
+  /** Sets properties of one node as one undoable edit. */
+  sceneSet: (id: string, path: string, node: string, changes: [string, string][]) =>
+    invoke<EditState>("scene_set", { id, path, node, changes }),
+  exportFiles: (id: string, dest: string) => invoke<number>("export_files", { id, dest }),
   readMediaItem: (id: string, path: string, offset: number, len: number, mime: string) =>
     invoke<string>("read_media_item", { id, path, offset, len, mime }),
   saveMediaItem: (id: string, path: string, offset: number, len: number, dest: string) =>

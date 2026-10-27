@@ -5,6 +5,7 @@ import { categories, categoryLabel } from "../lib/categories";
 import type { Category, EditState, GameObject, Preview, References } from "../lib/types";
 import { CategoryIcon, ObjectIcon, UNEDITABLE_FORMATS, fileType, isImagePath } from "../lib/visuals";
 import EmbeddedMedia from "./EmbeddedMedia";
+import SceneEditor from "./SceneEditor";
 
 type Section = "details" | "properties" | "code" | "references";
 
@@ -33,6 +34,8 @@ export default function Inspector(props: Props) {
   // A line to scroll to in the preview (from a gameplay value).
   const [focusLine, setFocusLine] = useState<number | null>(null);
   const [section, setSection] = useState<Section>("details");
+  // For .tscn files: the visual scene editor or the plain text.
+  const [sceneView, setSceneView] = useState<"scene" | "text">("scene");
   const [editing, setEditing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Text selected in the preview or editor, for "Explain selection".
@@ -159,7 +162,25 @@ export default function Inspector(props: Props) {
             />
           )}
           {error && <div className="panel error small">{error}</div>}
-          {file &&
+          {file && file.endsWith(".tscn") && !editing && (
+            <div className="segmented scene-switch">
+              <button className={sceneView === "scene" ? "active" : ""} onClick={() => setSceneView("scene")}>
+                Scene
+              </button>
+              <button className={sceneView === "text" ? "active" : ""} onClick={() => setSceneView("text")}>
+                Text
+              </button>
+            </div>
+          )}
+          {file && file.endsWith(".tscn") && !editing && sceneView === "scene" ? (
+            <SceneEditor
+              projectId={projectId}
+              path={file}
+              editable={isEditablePath(file)}
+              revision={revision}
+              onEdited={onEdited}
+            />
+          ) : file &&
             (editing ? (
               <TextEditor
                 projectId={projectId}

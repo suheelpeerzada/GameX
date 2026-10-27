@@ -346,6 +346,37 @@ pub async fn get_references(
         .map_err(|e| e.to_string())
 }
 
+/// A Godot text scene's nodes, properties and resources.
+#[tauri::command]
+pub fn scene_load(state: State<'_, AppState>, id: String, path: String) -> Result<crate::scene::Scene, String> {
+    let project = state.workspace().project_dir(&id).map_err(|e| e.to_string())?;
+    let text = preview::read_text(&project, &path).map_err(|e| e.to_string())?;
+    Ok(crate::scene::parse(&project.join("unpacked"), &path, &text))
+}
+
+/// Sets properties of one node and saves them as one undoable edit.
+#[tauri::command]
+pub fn scene_set(
+    state: State<'_, AppState>,
+    id: String,
+    path: String,
+    node: String,
+    changes: Vec<(String, String)>,
+) -> Result<EditState, String> {
+    let project = state.workspace().project_dir(&id).map_err(|e| e.to_string())?;
+    let mut updated = preview::read_text(&project, &path).map_err(|e| e.to_string())?;
+    for (key, value) in &changes {
+        updated = crate::scene::set_property(&updated, &node, key, value)?;
+    }
+    edit_and_report(&state, &id, |s| s.save_text(&path, &updated))
+}
+
+/// Exports a ZIP or folder import with the edits applied.
+#[tauri::command]
+pub fn export_files(state: State<'_, AppState>, id: String, dest: String) -> Result<usize, String> {
+    state.edits(&id)?.export_files(std::path::Path::new(&dest)).map_err(|e| e.to_string())
+}
+
 /// Searches one file for embedded images and sounds (no AI involved).
 #[tauri::command]
 pub async fn scan_media(state: State<'_, AppState>, id: String, path: String) -> Result<Vec<crate::media::Found>, String> {

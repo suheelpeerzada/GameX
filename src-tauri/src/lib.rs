@@ -7,6 +7,7 @@ pub mod media;
 pub mod model;
 pub mod preview;
 pub mod rebuild;
+pub mod scene;
 pub mod settings;
 pub mod tools;
 pub mod workspace;
@@ -42,6 +43,9 @@ pub fn run() {
             commands::ai_status,
             commands::get_references,
             commands::scan_media,
+            commands::scene_load,
+            commands::scene_set,
+            commands::export_files,
             commands::read_media_item,
             commands::save_media_item,
             commands::ai_set_key,

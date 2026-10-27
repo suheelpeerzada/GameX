@@ -239,6 +239,23 @@ impl EditStore {
     }
 }
 
+impl EditStore {
+    /// Copies an imported ZIP or folder (`unpacked/files`) with the edits
+    /// applied into `dest`, which must be new or empty. Returns the number
+    /// of edited files included.
+    pub fn export_files(&self, dest: &Path) -> io::Result<usize> {
+        if dest.exists() && fs::read_dir(dest)?.next().is_some() {
+            return Err(invalid("Choose an empty folder to export into."));
+        }
+        let source = self.root.join("unpacked").join("files");
+        if !source.is_dir() {
+            return Err(invalid("Only games imported as a ZIP or folder can be exported this way."));
+        }
+        crate::import::copy_dir(&source, dest)?;
+        self.overlay("files/", dest)
+    }
+}
+
 fn file_name(rel: &str) -> &str {
     rel.rsplit('/').next().unwrap_or(rel)
 }
@@ -331,6 +348,25 @@ mod tests {
         let wav = dir.path().join("sound.wav");
         fs::write(&wav, "RIFF").unwrap();
         assert!(store.replace("apktool/icon.png", &wav).is_err());
+    }
+
+    #[test]
+    fn exports_files_with_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        let unpacked = dir.path().join("unpacked/files/scenes");
+        fs::create_dir_all(&unpacked).unwrap();
+        fs::write(unpacked.join("a.tscn"), "old").unwrap();
+        fs::write(unpacked.join("b.txt"), "same").unwrap();
+        let store = EditStore::new(dir.path());
+        store.save_text("files/scenes/a.tscn", "new").unwrap();
+
+        let dest = dir.path().join("out");
+        assert_eq!(store.export_files(&dest).unwrap(), 1);
+        assert_eq!(fs::read_to_string(dest.join("scenes/a.tscn")).unwrap(), "new");
+        assert_eq!(fs::read_to_string(dest.join("scenes/b.txt")).unwrap(), "same");
+        // The original stays as it was, and a non-empty folder is refused.
+        assert_eq!(fs::read_to_string(unpacked.join("a.tscn")).unwrap(), "old");
+        assert!(store.export_files(&dest).is_err());
     }
 
     #[test]

@@ -239,6 +239,39 @@ export interface Proposal {
   trimmed: string | null;
 }
 
+// Godot text scenes (src-tauri/src/scene.rs)
+
+export interface SceneProperty {
+  key: string;
+  value: string;
+  line: number;
+  endLine: number;
+}
+
+export interface SceneNode {
+  /** "." for the root, else the path from it ("Player/Sprite"). */
+  path: string;
+  name: string;
+  nodeType: string | null;
+  parent: string | null;
+  instance: string | null;
+  line: number;
+  properties: SceneProperty[];
+}
+
+export interface ExtResource {
+  id: string;
+  kind: string;
+  path: string;
+  /** File to preview for it, relative to unpacked/. */
+  file: string | null;
+}
+
+export interface Scene {
+  nodes: SceneNode[];
+  resources: ExtResource[];
+}
+
 /** An image or sound found inside a file by its content (src-tauri/src/media.rs). */
 export interface MediaItem {
   kind: "image" | "audio";

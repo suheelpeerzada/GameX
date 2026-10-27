@@ -19,6 +19,7 @@ pub mod settings;
 pub mod toolbox;
 pub mod tools;
 pub mod uiview;
+pub mod unity;
 pub mod workspace;
 
 use tauri::Manager;

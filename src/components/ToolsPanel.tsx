@@ -1,8 +1,15 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { CheckCircle2, Download, ExternalLink, RefreshCw, Trash2 } from "lucide-react";
+import { CheckCircle2, ChevronDown, ChevronUp, Download, ExternalLink, RefreshCw, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
-import { api, formatBytes, inDesktopApp } from "../lib/api";
-import type { ToolInfo, ToolProgress } from "../lib/types";
+import { api, formatBytes, inDesktopApp, pickPath } from "../lib/api";
+import type { Settings, ToolInfo, ToolProgress } from "../lib/types";
+
+/** Tools whose path can be set by hand, and the setting that holds it. */
+const PATH_KEYS: Record<string, keyof Settings> = {
+  apktool: "apktoolPath",
+  jadx: "jadxPath",
+  "uber-apk-signer": "signerPath",
+};
 
 /** Downloads one tool, reporting progress. Shared by the panel and prompts. */
 export async function installTool(id: string, onProgress: (p: ToolProgress) => void): Promise<ToolInfo> {
@@ -36,6 +43,38 @@ export default function ToolsPanel({ onChanged }: { onChanged?: () => void }) {
   const [busy, setBusy] = useState<Record<string, boolean>>({});
   const [progress, setProgress] = useState<Record<string, ToolProgress>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [settings, setSettings] = useState<Settings | null>(null);
+  // Custom paths being typed, not saved yet.
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    if (inDesktopApp) api.getSettings().then(setSettings).catch(console.error);
+  }, []);
+
+  const toggle = (id: string) =>
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
+  const savePath = async (id: string, value: string) => {
+    const key = PATH_KEYS[id];
+    if (!key || !settings) return;
+    const next = { ...settings, [key]: value.trim() === "" ? null : value.trim() };
+    try {
+      await api.saveSettings(next);
+      setSettings(next);
+      setDrafts(({ [id]: _, ...rest }) => rest);
+      setErrors((x) => ({ ...x, [id]: "" }));
+    } catch (e) {
+      setErrors((x) => ({ ...x, [id]: String(e) }));
+    }
+    refresh();
+    onChanged?.();
+  };
 
   const refresh = useCallback(() => {
     if (inDesktopApp) api.toolsCatalog().then(setTools).catch(console.error);
@@ -71,83 +110,135 @@ export default function ToolsPanel({ onChanged }: { onChanged?: () => void }) {
     <section className="panel">
       <h2>Tools</h2>
       <p className="muted small">
-        Optional programs GameX can use. Install only what you need: GameX downloads them from their official releases
-        into its own folder, and asks when something you do needs one that's missing. Tools with their own installer are
-        found automatically once installed.
+        Optional programs GameX can use. Install only what you need; GameX asks when something you do needs one that's
+        missing. Expand a tool for details and a custom path.
       </p>
       <ul className="tool-list">
-        {tools.map((tool) => (
-          <li key={tool.id} className="tool-card">
-            <div className="tool-main">
-              <div className="tool-title">
-                <strong>{tool.name}</strong>
-                {tool.installed ? (
-                  <span className="pill ok">
-                    <CheckCircle2 size={11} />{" "}
-                    {tool.origin === "GameX"
-                      ? `installed ${tool.version ?? ""}`
-                      : tool.origin === "settings"
-                        ? "your path (Settings)"
-                        : "found on your PC"}
-                  </span>
-                ) : (
-                  <span className="pill muted-pill">not installed</span>
-                )}
-              </div>
-              <div className="muted small">{tool.description}</div>
-              <div className="small tool-meta">
-                Used for: {tool.usedFor} · {tool.size}
-              </div>
-              {tool.installed && tool.path && <div className="mono tiny muted">{tool.path}</div>}
-              {tool.installed && tool.managed && tool.origin !== "GameX" && (
-                <div className="muted tiny">
-                  GameX is using your own copy. Installing GameX's copy is optional; a path set below always wins.
-                </div>
-              )}
-              {busy[tool.id] && tool.managed && <ProgressBar progress={progress[tool.id]} />}
-              {errors[tool.id] && <div className="error-text small">{errors[tool.id]}</div>}
-            </div>
-            <div className="tool-actions">
-              {tool.managed ? (
-                <>
+        {tools.map((tool) => {
+          const open = expanded.has(tool.id);
+          const pathKey = PATH_KEYS[tool.id];
+          return (
+            <li key={tool.id} className="tool-card">
+              <div className="tool-row">
+                <div className="tool-title">
+                  <strong>{tool.name}</strong>
                   <button
-                    className={tool.installed ? "" : "primary"}
-                    disabled={!inDesktopApp || busy[tool.id]}
-                    onClick={() => install(tool)}
-                    title={tool.installed && tool.origin !== "GameX" ? "Install GameX's own copy (optional)" : undefined}
+                    className="tool-expand"
+                    onClick={() => toggle(tool.id)}
+                    aria-expanded={open}
+                    title={open ? "Hide details" : "Show details"}
                   >
-                    {tool.installed ? <RefreshCw size={14} /> : <Download size={14} />}
-                    {busy[tool.id]
-                      ? "Working…"
-                      : !tool.installed
-                        ? "Install"
-                        : tool.origin === "GameX"
-                          ? "Update"
-                          : "Install GameX's copy"}
+                    {open ? <ChevronUp size={15} /> : <ChevronDown size={15} />}
                   </button>
-                  {tool.installed && tool.origin === "GameX" && (
-                    <button disabled={busy[tool.id]} onClick={() => remove(tool)} title="Remove">
-                      <Trash2 size={14} />
+                  {tool.installed ? (
+                    <span className="pill ok">
+                      <CheckCircle2 size={11} />{" "}
+                      {tool.origin === "GameX"
+                        ? `installed ${tool.version ?? ""}`
+                        : tool.origin === "settings"
+                          ? "your custom path"
+                          : "found on your PC"}
+                    </span>
+                  ) : (
+                    <span className="pill muted-pill">not installed</span>
+                  )}
+                </div>
+                <div className="tool-actions">
+                  {tool.managed && (!tool.installed || tool.origin === "GameX") && (
+                    <button
+                      className={tool.installed ? "" : "primary"}
+                      disabled={!inDesktopApp || busy[tool.id]}
+                      onClick={() => install(tool)}
+                    >
+                      {tool.installed ? <RefreshCw size={14} /> : <Download size={14} />}
+                      {busy[tool.id] ? "Working…" : tool.installed ? "Update" : "Install"}
                     </button>
                   )}
-                </>
-              ) : (
-                <>
-                  {!tool.installed && (
+                  {!tool.managed && !tool.installed && (
                     <button className="primary" onClick={() => openUrl(tool.homepage).catch(() => {})}>
                       <ExternalLink size={14} />
                       Get it
                     </button>
                   )}
-                  <button onClick={refresh} title="Look for it again">
-                    <RefreshCw size={14} />
-                    Check again
-                  </button>
-                </>
+                </div>
+              </div>
+              {busy[tool.id] && tool.managed && <ProgressBar progress={progress[tool.id]} />}
+              {errors[tool.id] && <div className="error-text small">{errors[tool.id]}</div>}
+
+              {open && (
+                <div className="tool-details">
+                  <div className="muted small">{tool.description}</div>
+                  <div className="small tool-meta">
+                    Used for: {tool.usedFor} · {tool.size}
+                  </div>
+                  {tool.installed && tool.path && (
+                    <div className="small">
+                      In use: <span className="mono tiny muted">{tool.path}</span>
+                    </div>
+                  )}
+                  {pathKey && (
+                    <div className="tool-path">
+                      <span className="small">Custom path</span>
+                      <div className="row">
+                        <input
+                          type="text"
+                          placeholder="Not set: GameX's copy or PATH is used"
+                          value={drafts[tool.id] ?? settings?.[pathKey] ?? ""}
+                          onChange={(e) => setDrafts((d) => ({ ...d, [tool.id]: e.target.value }))}
+                        />
+                        <button
+                          disabled={!inDesktopApp}
+                          onClick={async () => {
+                            const picked = await pickPath("tool");
+                            if (picked) setDrafts((d) => ({ ...d, [tool.id]: picked }));
+                          }}
+                        >
+                          Browse
+                        </button>
+                        <button
+                          className="primary"
+                          disabled={!inDesktopApp || drafts[tool.id] === undefined}
+                          onClick={() => savePath(tool.id, drafts[tool.id] ?? "")}
+                        >
+                          Save
+                        </button>
+                        {settings?.[pathKey] && (
+                          <button onClick={() => savePath(tool.id, "")} title="Stop using a custom path">
+                            Clear
+                          </button>
+                        )}
+                      </div>
+                      <span className="muted tiny">A custom path always wins over GameX's copy and PATH.</span>
+                    </div>
+                  )}
+                  <div className="row tool-more">
+                    {tool.managed && tool.installed && tool.origin !== "GameX" && (
+                      <button disabled={busy[tool.id]} onClick={() => install(tool)}>
+                        <Download size={14} />
+                        Install GameX's own copy
+                      </button>
+                    )}
+                    {tool.managed && tool.installed && tool.origin === "GameX" && (
+                      <button disabled={busy[tool.id]} onClick={() => remove(tool)}>
+                        <Trash2 size={14} />
+                        Remove
+                      </button>
+                    )}
+                    {!tool.managed && (
+                      <button onClick={refresh}>
+                        <RefreshCw size={14} />
+                        Check again
+                      </button>
+                    )}
+                    <button className="link" onClick={() => openUrl(tool.homepage).catch(() => {})}>
+                      Website
+                    </button>
+                  </div>
+                </div>
               )}
-            </div>
-          </li>
-        ))}
+            </li>
+          );
+        })}
       </ul>
     </section>
   );

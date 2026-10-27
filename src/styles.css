@@ -1097,3 +1097,13 @@ pre.code { line-height: 1.5; }
 .tool-progress .bar { width: 180px; height: 6px; }
 .tool-prompt h2 { display: flex; align-items: center; gap: 8px; }
 .tool-prompt .panel h2 { display: block; }
+
+/* Tool cards: one line, details on demand */
+.tool-card { flex-direction: column; align-items: stretch; gap: 6px; padding: 10px 14px; }
+.tool-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.tool-expand { display: grid; place-items: center; padding: 2px; border: none; background: transparent; color: var(--muted); }
+.tool-expand:hover { color: var(--text); background: var(--border); }
+.tool-details { display: flex; flex-direction: column; gap: 6px; padding-top: 8px; border-top: 1px solid var(--border); }
+.tool-path { display: flex; flex-direction: column; gap: 4px; margin-top: 4px; }
+.tool-more { flex-wrap: wrap; margin-top: 2px; }
+.tool-more button { display: flex; align-items: center; gap: 6px; }

@@ -23,6 +23,8 @@ pub struct AppState {
     runs: Mutex<std::collections::HashMap<String, crate::device::Launched>>,
     /// Live debug connections to running games, by project id.
     lives: LiveSessions,
+    /// Screen mirrors of running games, by project id.
+    mirrors: Mutex<std::collections::HashMap<String, crate::mirror::Mirror>>,
     workspace_root: PathBuf,
     signing_dir: PathBuf,
     settings_path: PathBuf,
@@ -37,6 +39,7 @@ impl AppState {
             data_dir: data_dir.clone(),
             runs: Mutex::new(std::collections::HashMap::new()),
             lives: Default::default(),
+            mirrors: Mutex::new(std::collections::HashMap::new()),
             signing_dir: {
                 crate::toolbox::set_tools_dir(data_dir.join("tools"));
                 data_dir.join("signing")
@@ -558,6 +561,78 @@ pub async fn run_stop(state: State<'_, AppState>, id: String) -> Result<(), Stri
     tauri::async_runtime::spawn_blocking(move || crate::device::stop(&launched.target, &launched.package))
         .await
         .map_err(|e| e.to_string())?
+}
+
+// ---------------------------------------------------------------------------
+// The game's screen inside GameX
+
+/// Starts streaming the screen of the device the game runs on. Frames arrive
+/// on `channel` as raw bytes (first byte 1 = key frame); setup and end
+/// notices arrive as JSON.
+#[tauri::command]
+pub fn mirror_start(
+    state: State<'_, AppState>,
+    id: String,
+    channel: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
+) -> Result<(), String> {
+    use tauri::ipc::InvokeResponseBody;
+    let launched = state.runs.lock().unwrap().get(&id).cloned().ok_or("Start the game with Run first.")?;
+    let (adb, serial) = crate::device::adb_endpoint(&launched.target)?;
+    if let Some(old) = state.mirrors.lock().unwrap().remove(&id) {
+        old.stop();
+    }
+    let mirror = crate::mirror::Mirror::start(adb, serial, move |message| {
+        let body = match message {
+            crate::mirror::Message::Setup { codec, width, height, device_width, device_height } => {
+                InvokeResponseBody::Json(
+                    serde_json::json!({
+                        "type": "setup", "codec": codec, "width": width, "height": height,
+                        "deviceWidth": device_width, "deviceHeight": device_height
+                    })
+                    .to_string(),
+                )
+            }
+            crate::mirror::Message::Frame(frame) => {
+                let mut bytes = Vec::with_capacity(frame.data.len() + 1);
+                bytes.push(frame.key as u8);
+                bytes.extend_from_slice(&frame.data);
+                InvokeResponseBody::Raw(bytes)
+            }
+            crate::mirror::Message::Ended(reason) => {
+                InvokeResponseBody::Json(serde_json::json!({ "type": "ended", "reason": reason }).to_string())
+            }
+        };
+        channel.send(body).is_ok()
+    })?;
+    state.mirrors.lock().unwrap().insert(id, mirror);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn mirror_stop(state: State<'_, AppState>, id: String) {
+    if let Some(m) = state.mirrors.lock().unwrap().remove(&id) {
+        m.stop();
+    }
+}
+
+/// A touch on the mirrored screen, in device pixels: a tap when the start
+/// and end are the same, else a swipe; `millis` is how long it was held.
+#[tauri::command]
+pub fn mirror_touch(state: State<'_, AppState>, id: String, x1: u32, y1: u32, x2: u32, y2: u32, millis: u32) -> Result<(), String> {
+    let mirrors = state.mirrors.lock().unwrap();
+    let m = mirrors.get(&id).ok_or("The screen isn't being shown.")?;
+    m.input(&crate::mirror::touch_command(x1, y1, x2, y2, millis))
+}
+
+/// Android keys: 4 = Back, 3 = Home.
+#[tauri::command]
+pub fn mirror_key(state: State<'_, AppState>, id: String, code: u32) -> Result<(), String> {
+    if !matches!(code, 3 | 4 | 82 | 187) {
+        return Err("That key isn't supported.".into());
+    }
+    let mirrors = state.mirrors.lock().unwrap();
+    let m = mirrors.get(&id).ok_or("The screen isn't being shown.")?;
+    m.input(&format!("input keyevent {code}"))
 }
 
 // ---------------------------------------------------------------------------

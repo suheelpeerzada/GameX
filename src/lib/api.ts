@@ -1,4 +1,4 @@
-import { invoke, isTauri } from "@tauri-apps/api/core";
+import { invoke, isTauri, type Channel } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import type {
@@ -93,6 +93,11 @@ export const api = {
     invoke<Launched>("run_game", { id, target, apk, replace }),
   runStatus: (id: string) => invoke<RunStatus | null>("run_status", { id }),
   runStop: (id: string) => invoke<void>("run_stop", { id }),
+  mirrorStart: (id: string, channel: Channel<unknown>) => invoke<void>("mirror_start", { id, channel }),
+  mirrorStop: (id: string) => invoke<void>("mirror_stop", { id }),
+  mirrorTouch: (id: string, x1: number, y1: number, x2: number, y2: number, millis: number) =>
+    invoke<void>("mirror_touch", { id, x1, y1, x2, y2, millis }),
+  mirrorKey: (id: string, code: number) => invoke<void>("mirror_key", { id, code }),
   liveAttach: (id: string) => invoke<{ pid: number; package: string; target: string }>("live_attach", { id }),
   liveDetach: (id: string) => invoke<void>("live_detach", { id }),
   liveCounts: (id: string, classes: string[]) => invoke<LiveClassCount[]>("live_counts", { id, classes }),

@@ -348,6 +348,12 @@ pub fn unforward(target: &str, port: u16) {
     }
 }
 
+/// The adb program and serial that reach a target.
+pub fn adb_endpoint(target: &str) -> Result<(PathBuf, String), String> {
+    let adb = adb_for(target)?;
+    Ok((adb.exe, adb.serial))
+}
+
 pub fn stop(target: &str, package: &str) -> Result<(), String> {
     adb_for(target)?.shell(&format!("am force-stop {package}")).map(|_| ())
 }

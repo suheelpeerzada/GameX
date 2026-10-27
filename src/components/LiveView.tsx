@@ -4,6 +4,7 @@ import { api } from "../lib/api";
 import { categories } from "../lib/categories";
 import type { Category, GameObject, LiveClassCount, LiveField, LiveInstance, LiveObject } from "../lib/types";
 import { CategoryIcon } from "../lib/visuals";
+import GameScreen from "./GameScreen";
 
 interface Props {
   projectId: string;
@@ -11,6 +12,8 @@ interface Props {
   /** Opens a class in the Content tab. */
   onOpenObject: (id: string) => void;
   onRun: () => void;
+  /** Whether the Live tab is on screen. */
+  visible: boolean;
 }
 
 /**
@@ -18,7 +21,7 @@ interface Props {
  * many objects of each are alive, the objects themselves, and their fields,
  * which can be changed while the game runs.
  */
-export default function LiveView({ projectId, objects, onOpenObject, onRun }: Props) {
+export default function LiveView({ projectId, objects, onOpenObject, onRun, visible }: Props) {
   const [connected, setConnected] = useState<{ pid: number; package: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -134,6 +137,8 @@ export default function LiveView({ projectId, objects, onOpenObject, onRun }: Pr
 
   if (!connected) {
     return (
+      <div className="live-split">
+        <GameScreen projectId={projectId} visible={visible} />
       <div className="live-empty">
         <Activity size={28} className="ai-mark" />
         <h2>Live editing</h2>
@@ -151,10 +156,13 @@ export default function LiveView({ projectId, objects, onOpenObject, onRun }: Pr
           </button>
         </div>
       </div>
+      </div>
     );
   }
 
   return (
+    <div className="live-split">
+      <GameScreen projectId={projectId} visible={visible} />
     <div className="live">
       <div className="live-bar">
         <span className="status-dot ok" />
@@ -297,6 +305,7 @@ export default function LiveView({ projectId, objects, onOpenObject, onRun }: Pr
         Changes apply to the running game immediately and last until the game restarts. To keep a change, edit the
         class's smali (Open source) and rebuild.
       </p>
+    </div>
     </div>
   );
 }

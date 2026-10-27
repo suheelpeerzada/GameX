@@ -1167,3 +1167,24 @@ pre.code { line-height: 1.5; }
 .live-input:hover { border-color: var(--border); }
 .live-input.editing, .live-input:focus { border-color: var(--accent); background: var(--raised); outline: none; }
 .live-note { padding: 6px 16px; margin: 0; border-top: 1px solid var(--border); }
+
+/* Live tab: game on the left, inspector on the right */
+.live-split { flex: 1; min-height: 0; display: flex; }
+.live-split > .live, .live-split > .live-empty { flex: 1; min-width: 0; }
+.live-split > .live-empty { padding: 0 32px; }
+.game-screen { width: 360px; flex-shrink: 0; display: flex; flex-direction: column; border-right: 1px solid var(--border); background: var(--surface); }
+.game-screen-head { display: flex; align-items: center; gap: 4px; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+.game-screen-body { position: relative; flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; padding: 10px; background: #000; }
+.game-canvas { max-width: 100%; max-height: 100%; width: auto; height: 100%; background: #000; cursor: pointer; touch-action: none; }
+.game-screen-note { position: absolute; left: 12px; right: 12px; bottom: 12px; padding: 6px 8px; border-radius: 6px; background: rgba(0, 0, 0, 0.7); }
+.game-screen-tip { padding: 6px 10px; border-top: 1px solid var(--border); }
+
+/* Header: the name shortens instead of wrapping in narrow windows */
+.project-identity { flex: 1; min-width: 0; }
+.project-identity > div:last-child { min-width: 0; }
+.project-title { min-width: 0; }
+.project-title h1 { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.project-subtitle { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.head-actions { flex-shrink: 0; }
+.head-actions button { white-space: nowrap; }
+.status-badge { flex-shrink: 0; }

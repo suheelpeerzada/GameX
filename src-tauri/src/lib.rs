@@ -8,6 +8,7 @@ pub mod import;
 pub mod jdwp;
 pub mod live;
 pub mod media;
+pub mod mirror;
 pub mod model;
 pub mod preview;
 pub mod rebuild;
@@ -70,6 +71,10 @@ pub fn run() {
             commands::run_game,
             commands::run_status,
             commands::run_stop,
+            commands::mirror_start,
+            commands::mirror_stop,
+            commands::mirror_touch,
+            commands::mirror_key,
             commands::live_attach,
             commands::live_detach,
             commands::live_counts,

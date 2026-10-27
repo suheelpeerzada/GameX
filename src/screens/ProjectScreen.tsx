@@ -329,6 +329,10 @@ export default function ProjectScreen({ project, active: shown, focus, onToggleF
           onClose={() => setRunOpen(false)}
           onRunning={setGameRunning}
           onOpenSettings={onOpenSettings}
+          onEditLive={() => {
+            setRunOpen(false);
+            setTab("live");
+          }}
         />
       )}
       {building && (
@@ -516,6 +520,7 @@ export default function ProjectScreen({ project, active: shown, focus, onToggleF
             projectId={project.id}
             objects={analysis.objects}
             onOpenObject={openObject}
+            visible={shown && tab === "live"}
             onRun={() => {
               setRunMounted(true);
               setRunOpen(true);

@@ -1,4 +1,4 @@
-import { Play, RefreshCw, Smartphone, Square } from "lucide-react";
+import { Activity, Play, RefreshCw, Smartphone, Square } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../lib/api";
 import type { RunOptions, RunStatus, RunTarget } from "../lib/types";
@@ -10,6 +10,8 @@ interface Props {
   /** Reports whether the game is running, for the header button. */
   onRunning: (running: boolean) => void;
   onOpenSettings: () => void;
+  /** Opens the Live tab. */
+  onEditLive: () => void;
 }
 
 type Problem = { kind: "adb"; index: number } | { kind: "replace" } | { kind: "error"; message: string } | null;
@@ -19,7 +21,7 @@ type Problem = { kind: "adb"; index: number } | { kind: "replace" } | { kind: "e
  * GameX starts the emulator, installs, launches and keeps an eye on it.
  * Stays mounted while closed so it can keep watching the game.
  */
-export default function RunDialog({ projectId, open, onClose, onRunning, onOpenSettings }: Props) {
+export default function RunDialog({ projectId, open, onClose, onRunning, onOpenSettings, onEditLive }: Props) {
   const [targets, setTargets] = useState<RunTarget[] | null>(null);
   const [target, setTarget] = useState<string>("");
   const [options, setOptions] = useState<RunOptions | null>(null);
@@ -132,9 +134,14 @@ export default function RunDialog({ projectId, open, onClose, onRunning, onOpenS
             </div>
             <div className="run-status-actions">
               {running ? (
-                <button onClick={stop}>
-                  <Square size={14} /> Stop
-                </button>
+                <>
+                  <button className="primary" onClick={onEditLive}>
+                    <Activity size={14} /> Edit live
+                  </button>
+                  <button onClick={stop}>
+                    <Square size={14} /> Stop
+                  </button>
+                </>
               ) : (
                 <button className="primary" onClick={() => start()} disabled={busy}>
                   <RefreshCw size={14} /> Restart

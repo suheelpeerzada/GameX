@@ -83,7 +83,12 @@ export default function ToolsPanel({ onChanged }: { onChanged?: () => void }) {
                 <strong>{tool.name}</strong>
                 {tool.installed ? (
                   <span className="pill ok">
-                    <CheckCircle2 size={11} /> {tool.origin === "detected" ? "found" : `installed ${tool.version ?? ""}`}
+                    <CheckCircle2 size={11} />{" "}
+                    {tool.origin === "GameX"
+                      ? `installed ${tool.version ?? ""}`
+                      : tool.origin === "settings"
+                        ? "your path (Settings)"
+                        : "found on your PC"}
                   </span>
                 ) : (
                   <span className="pill muted-pill">not installed</span>
@@ -94,6 +99,11 @@ export default function ToolsPanel({ onChanged }: { onChanged?: () => void }) {
                 Used for: {tool.usedFor} · {tool.size}
               </div>
               {tool.installed && tool.path && <div className="mono tiny muted">{tool.path}</div>}
+              {tool.installed && tool.managed && tool.origin !== "GameX" && (
+                <div className="muted tiny">
+                  GameX is using your own copy. Installing GameX's copy is optional; a path set below always wins.
+                </div>
+              )}
               {busy[tool.id] && tool.managed && <ProgressBar progress={progress[tool.id]} />}
               {errors[tool.id] && <div className="error-text small">{errors[tool.id]}</div>}
             </div>
@@ -104,9 +114,16 @@ export default function ToolsPanel({ onChanged }: { onChanged?: () => void }) {
                     className={tool.installed ? "" : "primary"}
                     disabled={!inDesktopApp || busy[tool.id]}
                     onClick={() => install(tool)}
+                    title={tool.installed && tool.origin !== "GameX" ? "Install GameX's own copy (optional)" : undefined}
                   >
                     {tool.installed ? <RefreshCw size={14} /> : <Download size={14} />}
-                    {busy[tool.id] ? "Working…" : tool.installed ? "Update" : "Install"}
+                    {busy[tool.id]
+                      ? "Working…"
+                      : !tool.installed
+                        ? "Install"
+                        : tool.origin === "GameX"
+                          ? "Update"
+                          : "Install GameX's copy"}
                   </button>
                   {tool.installed && tool.origin === "GameX" && (
                     <button disabled={busy[tool.id]} onClick={() => remove(tool)} title="Remove">

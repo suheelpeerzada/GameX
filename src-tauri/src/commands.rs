@@ -445,8 +445,41 @@ pub async fn ai_propose(
 // Optional tools (Settings → Tools)
 
 #[tauri::command]
-pub fn tools_catalog() -> Vec<crate::toolbox::ToolInfo> {
-    crate::toolbox::catalog()
+pub fn tools_catalog(state: State<'_, AppState>) -> Vec<crate::toolbox::ToolInfo> {
+    let settings = state.settings();
+    let mut catalog = crate::toolbox::catalog();
+    // A tool you set up yourself counts too: a Settings path, PATH or
+    // JAVA_HOME. GameX's own copy is shown when that's the one in use.
+    for info in &mut catalog {
+        let tool = match info.id.as_str() {
+            "apktool" => Some(Tool::Apktool),
+            "jadx" => Some(Tool::Jadx),
+            "uber-apk-signer" => Some(Tool::Signer),
+            _ => None,
+        };
+        let (path, origin) = match (info.id.as_str(), tool) {
+            (_, Some(tool)) => {
+                let status = tools::status(tool, &settings);
+                (status.path, status.source.map(|s| if s == "PATH" { "system".to_string() } else { s }))
+            }
+            ("java", None) => {
+                let path = tools::java_tool("java").map(|p| p.display().to_string());
+                let ours = crate::toolbox::installed("java").map(|p| p.display().to_string());
+                let origin = path.as_ref().map(|p| if Some(p) == ours.as_ref() { "GameX" } else { "system" }.to_string());
+                (path, origin)
+            }
+            _ => continue,
+        };
+        if let (Some(path), Some(origin)) = (path, origin) {
+            if origin != "GameX" {
+                info.version = None;
+            }
+            info.installed = true;
+            info.path = Some(path);
+            info.origin = Some(origin);
+        }
+    }
+    catalog
 }
 
 #[derive(Clone, serde::Serialize)]

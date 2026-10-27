@@ -212,7 +212,8 @@ pub struct ToolInfo {
     pub installed: bool,
     pub version: Option<String>,
     pub path: Option<String>,
-    /// "GameX" (installed by GameX) or "detected".
+    /// "GameX" (installed by GameX), "detected" (own installer), "settings"
+    /// (a path set in Settings) or "system" (on PATH / JAVA_HOME).
     pub origin: Option<String>,
 }
 

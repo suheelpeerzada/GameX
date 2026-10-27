@@ -55,7 +55,7 @@ export default function SettingsScreen() {
     <div className="screen">
       <h1>Settings</h1>
       <ToolsPanel onChanged={() => api.toolStatus().then(setStatus)} />
-      <h2 className="settings-subhead">Custom tool paths (optional)</h2>
+      <h2 className="settings-subhead">Custom tool paths (advanced)</h2>
       <p className="muted">
         GameX runs these tools as separate programs. Leave a path empty to look for the tool on
         PATH. Imports work without apktool and jadx; the APK is then only extracted, not decompiled.

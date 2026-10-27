@@ -50,7 +50,8 @@ export interface ToolInfo {
   installed: boolean;
   version: string | null;
   path: string | null;
-  origin: "GameX" | "detected" | null;
+  /** Which copy is in use: GameX's, one with its own installer, a Settings path, or PATH/JAVA_HOME. */
+  origin: "GameX" | "detected" | "settings" | "system" | null;
 }
 
 export interface ToolProgress {

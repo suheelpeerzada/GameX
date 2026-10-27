@@ -27,7 +27,59 @@ use crate::workspace::Workspace;
 use tree::FileTree;
 
 /// Bump when analysis output changes, so cached results are redone.
-pub const ANALYZER_VERSION: u32 = 4;
+pub const ANALYZER_VERSION: u32 = 5;
+
+/// Object kinds that hold other files, worth searching for embedded media.
+const CONTAINER_KINDS: &[&str] = &[
+    "Godot data pack", "Unity asset file", "streamed asset data", "asset bundle", "archive", "data", "file",
+];
+/// Total bytes the media search may read during one analysis.
+const MEDIA_SCAN_BUDGET: u64 = 1 << 30;
+
+/// Searches unknown files and containers for embedded images and sounds.
+/// An unplaced file that turns out to hold media becomes a media container
+/// (in Assets, or Audio if it's mostly sound) instead of staying Unsorted.
+/// Returns (files with media, images, sounds).
+fn find_embedded_media(root: &Path, objects: &mut [GameObject]) -> (usize, usize, usize) {
+    let mut budget = MEDIA_SCAN_BUDGET;
+    let (mut files, mut images, mut sounds) = (0, 0, 0);
+    for obj in objects.iter_mut() {
+        if !CONTAINER_KINDS.contains(&obj.kind.as_str()) {
+            continue;
+        }
+        let Some(first) = obj.source_files.first() else { continue };
+        let path = root.join(first);
+        let Ok(meta) = std::fs::metadata(&path) else { continue };
+        if meta.len() < 64 || meta.len() > crate::media::MAX_SCAN_BYTES || meta.len() > budget {
+            continue;
+        }
+        budget -= meta.len();
+        let Ok(bytes) = std::fs::read(&path) else { continue };
+        let found = crate::media::scan(&bytes);
+        if found.is_empty() {
+            continue;
+        }
+        let image_count = found.iter().filter(|f| f.kind == "image").count();
+        let sound_count = found.len() - image_count;
+        files += 1;
+        images += image_count;
+        sounds += sound_count;
+        let summary = crate::media::summary(&found);
+        obj.properties.push(crate::model::Property {
+            label: "Embedded media".into(),
+            value: summary.clone(),
+        });
+        if obj.auto_category == Category::Unsorted {
+            let category = if sound_count > image_count { Category::Audio } else { Category::Assets };
+            obj.auto_category = category;
+            obj.category = category;
+            obj.kind = "media container".into();
+            obj.confidence = 0.6;
+            obj.reason = format!("it contains {summary}, found by their file signatures");
+        }
+    }
+    (files, images, sounds)
+}
 
 pub struct Detection {
     /// 0.0 = definitely not this engine, 1.0 = certain.
@@ -82,10 +134,16 @@ pub fn analyze(record: &ImportRecord, project_root: &Path) -> GameProject {
     }
     let (integration, detection) = best.expect("the generic integration always exists");
 
-    let objects = integration.analyze(&tree, &ctx);
+    let mut objects = integration.analyze(&tree, &ctx);
+    let (media_files, media_images, media_sounds) = find_embedded_media(&tree.root, &mut objects);
     let capabilities = integration.capabilities(&tree, &ctx, &objects);
 
     let mut notes = Vec::new();
+    if media_files > 0 {
+        notes.push(format!(
+            "The media search found {media_images} images and {media_sounds} sounds inside {media_files} files; open one to see them."
+        ));
+    }
     if tree.folded > 0 {
         notes.push(format!(
             "{} duplicate files from different unpack steps were merged into their objects.",

@@ -4,6 +4,7 @@ import { api, extensionOf, formatBytes, isEditablePath, mediaExtensions, pickFil
 import { categories, categoryLabel } from "../lib/categories";
 import type { Category, EditState, GameObject, Preview, References } from "../lib/types";
 import { CategoryIcon, ObjectIcon, UNEDITABLE_FORMATS, fileType, isImagePath } from "../lib/visuals";
+import EmbeddedMedia from "./EmbeddedMedia";
 
 type Section = "details" | "properties" | "code" | "references";
 
@@ -175,12 +176,24 @@ export default function Inspector(props: Props) {
                 <FilePreview key={`${file}:${revision}`} projectId={projectId} path={file} focusLine={focusLine} />
               </div>
             ))}
+          {file && !editing && mightHoldMedia(file) && (
+            <EmbeddedMedia
+              projectId={projectId}
+              path={file}
+              auto={object.properties.some((p) => p.label === "Embedded media")}
+            />
+          )}
         </>
       )}
 
       {section === "references" && <ReferencesSection projectId={projectId} object={object} onOpen={onOpen} />}
     </div>
   );
+}
+
+/** Binary files that aren't themselves an image or sound may contain some. */
+function mightHoldMedia(path: string): boolean {
+  return !TEXT_FILE.test(path) && !isImagePath(path) && !mediaExtensions.has(extensionOf(path));
 }
 
 /** One copy per file name: the best-decoded copy comes first in sourceFiles. */

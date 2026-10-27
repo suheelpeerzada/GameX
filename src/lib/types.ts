@@ -239,6 +239,17 @@ export interface Proposal {
   trimmed: string | null;
 }
 
+/** An image or sound found inside a file by its content (src-tauri/src/media.rs). */
+export interface MediaItem {
+  kind: "image" | "audio";
+  format: string;
+  mime: string;
+  offset: number;
+  len: number;
+  width: number | null;
+  height: number | null;
+}
+
 export interface ClassReference {
   /** The referring class, e.g. com.game.World. */
   class: string;

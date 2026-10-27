@@ -346,6 +346,47 @@ pub async fn get_references(
         .map_err(|e| e.to_string())
 }
 
+/// Searches one file for embedded images and sounds (no AI involved).
+#[tauri::command]
+pub async fn scan_media(state: State<'_, AppState>, id: String, path: String) -> Result<Vec<crate::media::Found>, String> {
+    let project = state.workspace().project_dir(&id).map_err(|e| e.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || crate::media::scan_file(&project, &path))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
+}
+
+/// One embedded item as a data URL, for previews and playback.
+#[tauri::command]
+pub fn read_media_item(
+    state: State<'_, AppState>,
+    id: String,
+    path: String,
+    offset: usize,
+    len: usize,
+    mime: String,
+) -> Result<String, String> {
+    use base64::Engine;
+    let project = state.workspace().project_dir(&id).map_err(|e| e.to_string())?;
+    let bytes = crate::media::read_item(&project, &path, offset, len).map_err(|e| e.to_string())?;
+    Ok(format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes)))
+}
+
+/// Saves one embedded item to a file the user chose.
+#[tauri::command]
+pub fn save_media_item(
+    state: State<'_, AppState>,
+    id: String,
+    path: String,
+    offset: usize,
+    len: usize,
+    dest: String,
+) -> Result<(), String> {
+    let project = state.workspace().project_dir(&id).map_err(|e| e.to_string())?;
+    let bytes = crate::media::read_item(&project, &path, offset, len).map_err(|e| e.to_string())?;
+    std::fs::write(&dest, bytes).map_err(|e| format!("Couldn't save to {dest}: {e}"))
+}
+
 /// Asks the AI for edits. Nothing is saved: the UI shows the proposal and
 /// saves it through `save_text_file` only if the user approves.
 #[tauri::command]

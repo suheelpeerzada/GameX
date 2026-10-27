@@ -241,6 +241,12 @@ fn loose_assets_zip_uses_generic() {
     touch(r, "files/gfx/gem.png", "png");
     touch(r, "files/sfx/hit.wav", "wav");
     touch(r, "files/data/stuff.bin", "\u{0}\u{1}");
+    // An unknown pack file with two PNGs inside: found by content.
+    let mut pack = b"PACK0001".to_vec();
+    pack.extend_from_slice(&crate::media::tests::png_bytes());
+    pack.extend_from_slice(&[0; 40]);
+    pack.extend_from_slice(&crate::media::tests::png_bytes());
+    fs::write(r.join("unpacked/files/data/sprites.pak"), &pack).unwrap();
     touch(r, "files/scripts/main.lua", "print()");
     let p = analyze(&record(ContainerKind::Zip, &["files"]), r);
     assert_eq!(p.engine.id, "generic");
@@ -249,6 +255,10 @@ fn loose_assets_zip_uses_generic() {
     assert_eq!(object(&p, "file:gfx/gem.png").category, Category::Items);
     assert_eq!(object(&p, "file:sfx/hit.wav").category, Category::Audio);
     assert_eq!(object(&p, "file:data/stuff.bin").category, Category::Unsorted);
+    let pak = object(&p, "file:data/sprites.pak");
+    assert_eq!((pak.category, pak.kind.as_str()), (Category::Assets, "media container"));
+    assert!(pak.properties.iter().any(|p| p.label == "Embedded media" && p.value == "2 images"));
+    assert!(p.notes.iter().any(|n| n.contains("found 2 images and 0 sounds inside 1 files")));
     assert_eq!(object(&p, "file:scripts/main.lua").category, Category::Core);
     assert_eq!(status(&p, "code"), CapabilityStatus::Partial);
     assert_eq!(status(&p, "assets"), CapabilityStatus::Supported);

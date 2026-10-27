@@ -13,6 +13,7 @@ import type {
   ModelInfo,
   Proposal,
   References,
+  MediaItem,
   ValueChange,
   GameProject,
   ImportProgress,
@@ -48,6 +49,11 @@ export const api = {
   buildApk: (id: string, options: BuildOptions) => invoke<BuildResult>("build_apk", { id, options }),
   readPng: (path: string) => invoke<string>("read_png", { path }),
   getReferences: (id: string, path: string) => invoke<References>("get_references", { id, path }),
+  scanMedia: (id: string, path: string) => invoke<MediaItem[]>("scan_media", { id, path }),
+  readMediaItem: (id: string, path: string, offset: number, len: number, mime: string) =>
+    invoke<string>("read_media_item", { id, path, offset, len, mime }),
+  saveMediaItem: (id: string, path: string, offset: number, len: number, dest: string) =>
+    invoke<void>("save_media_item", { id, path, offset, len, dest }),
   aiStatus: () => invoke<AiStatus>("ai_status"),
   aiSetKey: (key: string) => invoke<{ status: AiStatus; models: ModelInfo[] }>("ai_set_key", { key }),
   aiModels: () => invoke<ModelInfo[]>("ai_models"),
@@ -86,6 +92,11 @@ export async function pickPath(kind: PickKind): Promise<string | null> {
 export async function pickFile(label: string, extensions: string[]): Promise<string | null> {
   const result = await open({ multiple: false, filters: [{ name: label, extensions }] });
   return typeof result === "string" ? result : null;
+}
+
+/** Asks where to save a file of one type. */
+export async function pickSaveFile(defaultName: string, label: string, extension: string): Promise<string | null> {
+  return save({ defaultPath: defaultName, filters: [{ name: label, extensions: [extension] }] });
 }
 
 /** Asks where to save a new APK. */

@@ -3,6 +3,7 @@ pub mod analyzer;
 mod commands;
 pub mod edits;
 pub mod import;
+pub mod media;
 pub mod model;
 pub mod preview;
 pub mod rebuild;
@@ -40,6 +41,9 @@ pub fn run() {
             commands::read_png,
             commands::ai_status,
             commands::get_references,
+            commands::scan_media,
+            commands::read_media_item,
+            commands::save_media_item,
             commands::ai_set_key,
             commands::ai_models,
             commands::ai_set_model,

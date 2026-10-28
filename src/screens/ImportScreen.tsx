@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import ImportLoader from "../components/ImportLoader";
 import ToolPrompt from "../components/ToolPrompt";
 import { api, inDesktopApp, pickPath, type PickKind } from "../lib/api";
 import type { ImportProgress, ImportRecord } from "../lib/types";
@@ -25,8 +26,9 @@ const SOURCES: { kind: PickKind; title: string; detail: string }[] = [
 type Props = { onImported: (record: ImportRecord) => void };
 
 export default function ImportScreen({ onImported }: Props) {
-  const [busy, setBusy] = useState(false);
-  const [log, setLog] = useState<ImportProgress[]>([]);
+  // What's being imported (its name) and the step it's on.
+  const [busy, setBusy] = useState<string | null>(null);
+  const [current, setCurrent] = useState<ImportProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
   const busyRef = useRef(false);
@@ -43,10 +45,10 @@ export default function ImportScreen({ onImported }: Props) {
       }
     }
     busyRef.current = true;
-    setBusy(true);
+    setBusy(path.split(/[\\/]/).filter(Boolean).pop()?.replace(/\.(apk|zip)$/i, "") ?? "Game");
     setError(null);
-    setLog([]);
-    const unlisten = await api.onImportProgress((p) => setLog((l) => [...l, p]));
+    setCurrent(null);
+    const unlisten = await api.onImportProgress(setCurrent);
     try {
       onImported(await api.importGame(path));
     } catch (e) {
@@ -54,7 +56,7 @@ export default function ImportScreen({ onImported }: Props) {
     } finally {
       unlisten();
       busyRef.current = false;
-      setBusy(false);
+      setBusy(null);
     }
   };
 
@@ -108,7 +110,7 @@ export default function ImportScreen({ onImported }: Props) {
           <button
             key={s.kind}
             className="source-card"
-            disabled={busy || !inDesktopApp}
+            disabled={busy !== null || !inDesktopApp}
             onClick={() => choose(s.kind)}
           >
             <span className="source-title">{s.title}</span>
@@ -117,18 +119,7 @@ export default function ImportScreen({ onImported }: Props) {
         ))}
       </div>
 
-      {(busy || log.length > 0) && (
-        <section className="panel">
-          <h2>{busy ? "Importing…" : "Last import"}</h2>
-          <ol className="log">
-            {log.map((entry, i) => (
-              <li key={i} className={busy && i === log.length - 1 ? "current" : undefined}>
-                {entry.message}
-              </li>
-            ))}
-          </ol>
-        </section>
-      )}
+      {busy !== null && <ImportLoader name={busy} current={current} />}
 
       {error && (
         <section className="panel error">

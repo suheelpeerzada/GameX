@@ -15,15 +15,18 @@ import {
   Undo2,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import AiPanel from "../components/AiPanel";
-import BuildDialog from "../components/BuildDialog";
-import RunDialog from "../components/RunDialog";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import CategoryTree from "../components/CategoryTree";
-import LiveView from "../components/LiveView";
 import Inspector from "../components/Inspector";
 import { api, formatBytes, pickPath } from "../lib/api";
 import { statusLabel } from "../lib/categories";
+import { projectFeatures } from "../lib/features";
+
+// Loaded only when a project uses them (see lib/features.ts).
+const AiPanel = lazy(() => import("../components/AiPanel"));
+const BuildDialog = lazy(() => import("../components/BuildDialog"));
+const RunDialog = lazy(() => import("../components/RunDialog"));
+const LiveView = lazy(() => import("../components/LiveView"));
 import { currentTheme, setTheme, type Theme } from "../lib/theme";
 import type { AiStatus, Category, EditState, GameObject, GameProject, ImportRecord, ModelInfo } from "../lib/types";
 import { ObjectIcon, containerLongLabel } from "../lib/visuals";
@@ -55,9 +58,12 @@ function nameRoot(name: string): string | null {
 
 export default function ProjectScreen({ project, active: shown, focus, onToggleFocus, onOpenSettings }: Props) {
   const [analysis, setAnalysis] = useState<GameProject | null>(null);
+  const features = projectFeatures(project.container, analysis);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [tab, setTab] = useState<Tab>("content");
+  // The Live tab is set up the first time it's opened, then kept (its connection survives tab switches).
+  const [liveMounted, setLiveMounted] = useState(false);
   // Open objects, like editor tabs: each keeps its state while in the background.
   const [openTabs, setOpenTabs] = useState<string[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -259,8 +265,14 @@ export default function ProjectScreen({ project, active: shown, focus, onToggleF
             <button className={tab === "content" ? "active" : ""} onClick={() => setTab("content")}>
               Content
             </button>
-            {project.container === "apk" && (
-              <button className={tab === "live" ? "active" : ""} onClick={() => setTab("live")}>
+            {features.live && (
+              <button
+                className={tab === "live" ? "active" : ""}
+                onClick={() => {
+                  setLiveMounted(true);
+                  setTab("live");
+                }}
+              >
                 Live
               </button>
             )}
@@ -290,7 +302,7 @@ export default function ProjectScreen({ project, active: shown, focus, onToggleF
           <button className="icon-button" onClick={toggleTheme} title={theme === "dark" ? "Light theme" : "Dark theme"}>
             {theme === "dark" ? <Sun size={18} /> : <Moon size={18} />}
           </button>
-          {project.container === "apk" && (
+          {features.run && (
             <button
               className="build-button run-button"
               onClick={() => {
@@ -304,7 +316,7 @@ export default function ProjectScreen({ project, active: shown, focus, onToggleF
               {gameRunning && <span className="status-dot ok" title="The game is running" />}
             </button>
           )}
-          {project.container === "apk" ? (
+          {features.build ? (
             <button className="primary build-button" onClick={() => setBuilding(true)}>
               <Hammer size={16} />
               Build APK
@@ -323,22 +335,29 @@ export default function ProjectScreen({ project, active: shown, focus, onToggleF
       </header>
 
       {error && <div className="panel error project-error">{error}</div>}
-      {runMounted && (
-        <RunDialog
-          projectId={project.id}
-          open={runOpen}
-          onClose={() => setRunOpen(false)}
-          onRunning={setGameRunning}
-          onOpenSettings={onOpenSettings}
-          onEditLive={() => {
-            setRunOpen(false);
-            setTab("live");
-          }}
-        />
-      )}
-      {building && (
-        <BuildDialog projectId={project.id} editedCount={edits.edited.length} onClose={() => setBuilding(false)} />
-      )}
+      <Suspense fallback={null}>
+        {runMounted && (
+          <RunDialog
+            projectId={project.id}
+            open={runOpen}
+            onClose={() => setRunOpen(false)}
+            onRunning={setGameRunning}
+            onOpenSettings={onOpenSettings}
+            onEditLive={
+              features.live
+                ? () => {
+                    setRunOpen(false);
+                    setLiveMounted(true);
+                    setTab("live");
+                  }
+                : undefined
+            }
+          />
+        )}
+        {building && (
+          <BuildDialog projectId={project.id} editedCount={edits.edited.length} onClose={() => setBuilding(false)} />
+        )}
+      </Suspense>
 
       {analysis ? (
         // Kept mounted under Overview too, so open tabs keep their state.
@@ -480,6 +499,7 @@ export default function ProjectScreen({ project, active: shown, focus, onToggleF
                 </button>
               </div>
               <div className="ai-group-body">
+                <Suspense fallback={null}>
                 {!aiFile && aiStatus?.configured && (
                   <p className="muted small">Open an object from the tree. The assistant reads the active tab.</p>
                 )}
@@ -506,6 +526,7 @@ export default function ProjectScreen({ project, active: shown, focus, onToggleF
                       />
                     </div>
                   ))}
+                </Suspense>
               </div>
             </aside>
           )}
@@ -514,9 +535,10 @@ export default function ProjectScreen({ project, active: shown, focus, onToggleF
         !error && tab === "content" && <div className="screen muted">Analyzing the game…</div>
       )}
 
-      {analysis && project.container === "apk" && (
+      {analysis && features.live && liveMounted && (
         // Kept mounted so the connection and selection survive tab switches.
         <div className="live-host" hidden={tab !== "live"}>
+          <Suspense fallback={<div className="screen muted">Loading live editing…</div>}>
           <LiveView
             projectId={project.id}
             objects={analysis.objects}
@@ -529,6 +551,7 @@ export default function ProjectScreen({ project, active: shown, focus, onToggleF
               setRunOpen(true);
             }}
           />
+          </Suspense>
         </div>
       )}
 

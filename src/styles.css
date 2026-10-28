@@ -580,6 +580,71 @@ input[type="text"], input[type="password"], input[type="number"], select, textar
 .spin { animation: spin 0.9s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
+/* Import loader: the logo in a neon ring, and the current step */
+.import-loader {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 16px;
+  background:
+    radial-gradient(circle at 50% 42%, rgba(116, 101, 255, 0.22), transparent 55%),
+    rgba(7, 9, 20, 0.94);
+  color: #e8eaf6;
+  backdrop-filter: blur(6px);
+  animation: loader-in 0.25s ease-out;
+}
+.loader-ring { position: relative; width: min(220px, 60vw); aspect-ratio: 1; margin-bottom: 14px; }
+.loader-ring svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+.loader-track { fill: none; stroke: rgba(255, 255, 255, 0.07); stroke-width: 3; }
+.loader-ticks { stroke: rgba(34, 211, 238, 0.35); stroke-width: 1.5; transform-origin: 100px 100px; animation: spin 24s linear infinite reverse; }
+.loader-arc {
+  fill: none;
+  stroke-width: 5;
+  stroke-linecap: round;
+  stroke-dasharray: 150 390;
+  transform-origin: 100px 100px;
+  filter: drop-shadow(0 0 6px rgba(224, 64, 251, 0.75));
+  animation: spin 1.3s cubic-bezier(0.55, 0.15, 0.45, 0.85) infinite;
+}
+.loader-arc.inner { stroke-width: 2.5; stroke-dasharray: 60 405; opacity: 0.8; animation-duration: 2.1s; animation-direction: reverse; }
+.loader-logo {
+  position: absolute;
+  inset: 25%;
+  width: 50%;
+  height: 50%;
+  border-radius: 22%;
+  animation: loader-pulse 2.4s ease-in-out infinite;
+}
+.loader-name { font-size: 20px; font-weight: 700; letter-spacing: 0.02em; text-align: center; max-width: 90vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.loader-stage {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  color: #22d3ee;
+}
+.loader-dot { width: 7px; height: 7px; border-radius: 50%; background: #22d3ee; box-shadow: 0 0 8px #22d3ee; animation: loader-blink 1s steps(2) infinite; }
+.loader-time { color: #8d94b4; letter-spacing: 0.08em; margin-left: 4px; }
+.loader-message { color: #b6bcd8; font-size: 13px; text-align: center; max-width: 520px; min-height: 1.4em; animation: loader-in 0.35s ease-out; }
+@keyframes loader-pulse {
+  0%, 100% { transform: scale(1); filter: drop-shadow(0 0 10px rgba(116, 101, 255, 0.55)); }
+  50% { transform: scale(1.04); filter: drop-shadow(0 0 22px rgba(34, 211, 238, 0.7)); }
+}
+@keyframes loader-blink { 50% { opacity: 0.25; } }
+@keyframes loader-in { from { opacity: 0; transform: translateY(4px); } }
+@media (prefers-reduced-motion: reduce) {
+  .loader-arc, .loader-ticks, .loader-logo, .loader-dot { animation-duration: 6s; }
+  .loader-logo, .loader-dot { animation: none; }
+}
+
 /* Sidebar */
 .sidebar {
   width: 222px;

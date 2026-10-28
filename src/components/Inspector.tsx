@@ -6,7 +6,8 @@ import type { Category, EditState, GameObject, Preview, References } from "../li
 import { CategoryIcon, ObjectIcon, UNEDITABLE_FORMATS, fileType, isImagePath } from "../lib/visuals";
 import { isModelPath } from "../lib/models";
 import EmbeddedMedia from "./EmbeddedMedia";
-import SceneEditor from "./SceneEditor";
+// Only Godot text scenes use it.
+const SceneEditor = lazy(() => import("./SceneEditor"));
 
 type Section = "details" | "properties" | "code" | "references";
 
@@ -174,13 +175,15 @@ export default function Inspector(props: Props) {
             </div>
           )}
           {file && file.endsWith(".tscn") && !editing && sceneView === "scene" ? (
-            <SceneEditor
-              projectId={projectId}
-              path={file}
-              editable={isEditablePath(file)}
-              revision={revision}
-              onEdited={onEdited}
-            />
+            <Suspense fallback={<p className="muted small">Loading the scene editor…</p>}>
+              <SceneEditor
+                projectId={projectId}
+                path={file}
+                editable={isEditablePath(file)}
+                revision={revision}
+                onEdited={onEdited}
+              />
+            </Suspense>
           ) : file &&
             (editing ? (
               <TextEditor

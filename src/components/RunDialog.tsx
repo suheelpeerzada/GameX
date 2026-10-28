@@ -10,8 +10,8 @@ interface Props {
   /** Reports whether the game is running, for the header button. */
   onRunning: (running: boolean) => void;
   onOpenSettings: () => void;
-  /** Opens the Live tab. */
-  onEditLive: () => void;
+  /** Opens the Live tab; absent when the game can't be edited live. */
+  onEditLive?: () => void;
 }
 
 type Problem = { kind: "adb"; index: number } | { kind: "replace" } | { kind: "error"; message: string } | null;
@@ -135,9 +135,11 @@ export default function RunDialog({ projectId, open, onClose, onRunning, onOpenS
             <div className="run-status-actions">
               {running ? (
                 <>
-                  <button className="primary" onClick={onEditLive}>
-                    <Activity size={14} /> Edit live
-                  </button>
+                  {onEditLive && (
+                    <button className="primary" onClick={onEditLive}>
+                      <Activity size={14} /> Edit live
+                    </button>
+                  )}
                   <button onClick={stop}>
                     <Square size={14} /> Stop
                   </button>

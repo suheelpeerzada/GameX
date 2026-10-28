@@ -1,14 +1,16 @@
 import { getVersion } from "@tauri-apps/api/app";
 import { ChevronRight, Download, Gamepad2, Info, Settings } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import logo from "./assets/logo.png";
 import { api, inDesktopApp } from "./lib/api";
 import type { ImportRecord } from "./lib/types";
 import { containerLongLabel } from "./lib/visuals";
-import AboutScreen from "./screens/AboutScreen";
 import ImportScreen from "./screens/ImportScreen";
 import ProjectScreen from "./screens/ProjectScreen";
-import SettingsScreen from "./screens/SettingsScreen";
+
+// Loaded when first visited.
+const AboutScreen = lazy(() => import("./screens/AboutScreen"));
+const SettingsScreen = lazy(() => import("./screens/SettingsScreen"));
 
 type View = { kind: "import" } | { kind: "settings" } | { kind: "about" } | { kind: "project"; id: string };
 
@@ -128,8 +130,10 @@ export default function App() {
             }}
           />
         )}
-        {view.kind === "settings" && <SettingsScreen />}
-        {view.kind === "about" && <AboutScreen />}
+        <Suspense fallback={null}>
+          {view.kind === "settings" && <SettingsScreen />}
+          {view.kind === "about" && <AboutScreen />}
+        </Suspense>
         {projects
           .filter((p) => opened.includes(p.id))
           .map((p) => {

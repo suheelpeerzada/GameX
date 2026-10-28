@@ -80,9 +80,10 @@ export default function ProjectScreen({ project, active: shown, focus, onToggleF
   const [aiStatus, setAiStatus] = useState<AiStatus | null>(null);
   const [models, setModels] = useState<ModelInfo[]>([]);
 
-  const onEdited = (state: EditState) => {
+  /** `changed`: the files the edit touched, when known. Open tabs reload only if they show one. */
+  const onEdited = (state: EditState, changed?: string[]) => {
     setEdits(state);
-    setRevision((r) => r + 1);
+    if (!changed || tabObjects.some((o) => o.sourceFiles.some((f) => changed.includes(f)))) setRevision((r) => r + 1);
   };
 
   const load = useCallback(

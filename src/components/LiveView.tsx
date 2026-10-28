@@ -56,8 +56,8 @@ interface Props {
   /** Opens a class in the Content tab. */
   onOpenObject: (id: string) => void;
   onRun: () => void;
-  /** A live change was kept as an edit (or that edit undone). */
-  onEdited: (state: EditState) => void;
+  /** A live change was kept as an edit (or that edit undone); `changed` is the file it touched. */
+  onEdited: (state: EditState, changed?: string[]) => void;
   /** Opens the Build APK dialog. */
   onBuild: () => void;
   /** Whether the Live tab is on screen. */
@@ -105,6 +105,16 @@ export default function LiveView({ projectId, objects, onOpenObject, onRun, onEd
   const [hidden, setHidden] = useState<Set<string>>(() => loadHidden(projectId));
   const [showClasses, setShowClasses] = useState(false);
   const positionsBusy = useRef(false);
+  // The game has one debug connection, so requests wait for each other. A
+  // timed refresh is skipped while the previous one is still running, so they
+  // never pile up in front of a change being made.
+  const countsBusy = useRef(false);
+  const objectBusy = useRef(false);
+  // Bumped when a live change starts and ends: a refresh begun before then
+  // may carry the old value, and is dropped instead of shown.
+  const changeSeq = useRef(0);
+  const selectedObjectRef = useRef<string | null>(null);
+  selectedObjectRef.current = selectedObject;
 
   // The game's own classes (not libraries), grouped by category.
   const classes = useMemo(
@@ -141,11 +151,15 @@ export default function LiveView({ projectId, objects, onOpenObject, onRun, onEd
   };
 
   const refreshCounts = useCallback(async () => {
+    if (countsBusy.current) return;
+    countsBusy.current = true;
     try {
       const list: LiveClassCount[] = await api.liveCounts(projectId, classNames);
       setCounts(Object.fromEntries(list.map((c) => [c.class, c.count])));
     } catch (e) {
       fail(e);
+    } finally {
+      countsBusy.current = false;
     }
   }, [projectId, classNames]);
 
@@ -158,17 +172,25 @@ export default function LiveView({ projectId, objects, onOpenObject, onRun, onEd
     }
   }, [projectId, selectedClass]);
 
-  const refreshObject = useCallback(async () => {
-    if (!selectedObject) return;
+  /** Reads the open object's values; `timed` refreshes skip if one is running. */
+  const refreshObject = useCallback(async (timed = false) => {
+    if (!selectedObject || (timed && objectBusy.current)) return;
+    objectBusy.current = true;
+    const seq = changeSeq.current;
     try {
-      setObject(await api.liveObject(projectId, selectedObject));
+      const read = await api.liveObject(projectId, selectedObject);
+      // Not shown if another object was picked or a change was made meanwhile.
+      if (seq === changeSeq.current && read.id === selectedObjectRef.current) setObject(read);
     } catch (e) {
       const message = String(e);
+      if (selectedObject !== selectedObjectRef.current) return;
       if (message.includes("no longer exists")) {
         setObject(null);
         setSelectedObject(null);
         setError("That object no longer exists: the game removed it.");
       } else fail(e);
+    } finally {
+      objectBusy.current = false;
     }
   }, [projectId, selectedObject]);
 
@@ -187,7 +209,7 @@ export default function LiveView({ projectId, objects, onOpenObject, onRun, onEd
     if (!connected || !autoRefresh) return;
     const timer = window.setInterval(() => {
       refreshCounts();
-      refreshObject();
+      refreshObject(true);
     }, 1500);
     return () => window.clearInterval(timer);
   }, [connected, autoRefresh, refreshCounts, refreshObject]);
@@ -452,13 +474,22 @@ export default function LiveView({ projectId, objects, onOpenObject, onRun, onEd
     return groups;
   }, [classes, counts, onlyLive]);
 
+  // Keeps run one at a time: two at once could patch the same file over each other.
+  const keepQueue = useRef<Promise<unknown>>(Promise.resolve());
+
   /** Keeps one value in the game's code. Returns whether it worked. */
-  const keepValue = async (cls: string, field: LiveChange["field"], value: string, notify = true): Promise<boolean> => {
+  const keepValue = (cls: string, field: LiveChange["field"], value: string, notify = true): Promise<boolean> => {
+    const run = keepQueue.current.then(() => keepNow(cls, field, value, notify));
+    keepQueue.current = run;
+    return run;
+  };
+
+  const keepNow = async (cls: string, field: LiveChange["field"], value: string, notify: boolean): Promise<boolean> => {
     try {
       const result = await api.liveKeep(projectId, cls, field, value);
       if (notify) setKept({ ...result, field: field.name, value, isStatic: field.isStatic });
       setError(null);
-      onEdited(result.edits);
+      onEdited(result.edits, [result.file]);
       setChanges((list) => markKept(list, cls, field, value));
       return true;
     } catch (e) {
@@ -505,7 +536,7 @@ export default function LiveView({ projectId, objects, onOpenObject, onRun, onEd
         setError("Something else was changed after this. Revert the file in the Content tab instead.");
         return;
       }
-      onEdited(await api.undoEdit(projectId));
+      onEdited(await api.undoEdit(projectId), [kept.file]);
       setKept(null);
     } catch (e) {
       setError(String(e));
@@ -728,6 +759,7 @@ export default function LiveView({ projectId, objects, onOpenObject, onRun, onEd
                       changed={f.fieldId in typed}
                       onKeep={() => keep(f)}
                       onSet={async (value) => {
+                        changeSeq.current++;
                         try {
                           const shown = await api.liveSet(projectId, object.id, f.fieldId, value);
                           setTyped((t) => ({ ...t, [f.fieldId]: value }));
@@ -738,6 +770,8 @@ export default function LiveView({ projectId, objects, onOpenObject, onRun, onEd
                         } catch (e) {
                           setError(String(e));
                           return false;
+                        } finally {
+                          changeSeq.current++;
                         }
                       }}
                     />
@@ -770,11 +804,26 @@ function FieldRow({
   onKeep: () => void;
 }) {
   const [draft, setDraft] = useState<string | null>(null);
+  // Typed into since focusing: leaving the field then applies it (Escape
+  // throws it away). Only focusing, with nothing typed, never writes back.
+  const dirty = useRef(false);
+  const applying = useRef(false);
   const editing = draft !== null;
   const apply = async () => {
-    if (draft === null) return;
-    const ok = await onSet(draft.replace(/^"|"$/g, ""));
-    if (ok) setDraft(null);
+    if (draft === null || applying.current) return;
+    applying.current = true;
+    try {
+      if (await onSet(draft.replace(/^"|"$/g, ""))) {
+        dirty.current = false;
+        setDraft(null);
+      }
+    } finally {
+      applying.current = false;
+    }
+  };
+  const discard = () => {
+    dirty.current = false;
+    setDraft(null);
   };
   return (
     <tr className={field.isStatic ? "static" : undefined}>
@@ -788,14 +837,20 @@ function FieldRow({
             type="text"
             className={editing ? "mono live-input editing" : "mono live-input"}
             value={editing ? draft : field.value}
-            onFocus={() => setDraft(field.value)}
-            onChange={(e) => setDraft(e.target.value)}
-            onBlur={() => setDraft(null)}
+            onFocus={() => setDraft((d) => d ?? field.value)}
+            onChange={(e) => {
+              dirty.current = true;
+              setDraft(e.target.value);
+            }}
+            onBlur={() => (dirty.current ? apply() : discard())}
             onKeyDown={(e) => {
               if (e.key === "Enter") apply();
-              if (e.key === "Escape") (e.target as HTMLInputElement).blur();
+              if (e.key === "Escape") {
+                discard();
+                (e.target as HTMLInputElement).blur();
+              }
             }}
-            title="Type a new value and press Enter"
+            title="Type a new value and press Enter (or click away); Escape cancels"
           />
         ) : (
           <span className="mono small muted">{field.value}</span>

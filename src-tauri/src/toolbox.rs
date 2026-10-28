@@ -56,6 +56,11 @@ fn jadx_asset(name: &str) -> bool {
     name.starts_with("jadx-") && name.ends_with(".zip") && name[5..].starts_with(|c: char| c.is_ascii_digit())
 }
 
+fn assetstudio_asset(name: &str) -> bool {
+    // The command-line build for .NET Framework 4.7.2, which Windows 10/11 include.
+    name.starts_with("AssetStudioModCLI_net472") && name.ends_with(".zip")
+}
+
 pub const CATALOG: &[ToolSpec] = &[
     ToolSpec {
         id: "java",
@@ -112,6 +117,16 @@ pub const CATALOG: &[ToolSpec] = &[
         size: "about 45 MB",
         source: Source::GitHub { repo: "GDRETools/gdsdecomp", asset: |n| n.ends_with("windows.zip") },
         entry: "gdre_tools.exe",
+    },
+    ToolSpec {
+        id: "assetstudio",
+        name: "AssetStudio (Unity assets)",
+        description: "Exports a Unity game's packed images and sounds as ordinary files (PNG, WAV), so GameX can show Unity sprites and textures.",
+        used_for: "Unity games (images, sounds)",
+        homepage: "https://github.com/aelurum/AssetStudio",
+        size: "about 10 MB",
+        source: Source::GitHub { repo: "aelurum/AssetStudio", asset: assetstudio_asset },
+        entry: "AssetStudioModCLI.exe",
     },
     ToolSpec {
         id: "platform-tools",

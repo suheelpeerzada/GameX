@@ -1164,9 +1164,10 @@ dependencies = [
 
 [[package]]
 name = "gamex"
-version = "0.9.4"
+version = "1.0.0"
 dependencies = [
  "base64 0.22.1",
+ "flate2",
  "imagesize",
  "keyring",
  "reqwest 0.12.28",

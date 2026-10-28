@@ -13,6 +13,8 @@ const STAGES: Record<string, string> = {
   jadx: "Decompiling",
   unity: "Unity assets",
   godot: "Godot project",
+  layer: "Building the editor",
+  recover: "Recovering the game",
   done: "Finishing",
 };
 

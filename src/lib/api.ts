@@ -52,6 +52,8 @@ export const api = {
     invoke<void>("set_category", { id, objectId, category }),
   readPreview: (id: string, path: string) => invoke<Preview>("read_preview", { id, path }),
   readTextFile: (id: string, path: string) => invoke<string>("read_text_file", { id, path }),
+  /** Each game's launcher label and icon (data URL), by import ID. */
+  gameIdentities: (ids: string[]) => invoke<Record<string, { label: string; icon: string | null }>>("game_identities", { ids }),
   getEditState: (id: string) => invoke<EditState>("get_edit_state", { id }),
   saveTextFile: (id: string, path: string, text: string) =>
     invoke<EditState>("save_text_file", { id, path, text }),
@@ -138,6 +140,15 @@ export const api = {
       value,
     }),
   livePositions: (id: string, classes: string[]) => invoke<LivePosition[]>("live_positions", { id, classes }),
+  /** Puts where the running game's objects are into its layer as a new scene. */
+  liveCaptureLevel: (id: string, layer: string, classes: string[], screen?: string | null, calibration?: [number, number, number, number] | null) =>
+    invoke<{ scene: string; objects: number; matched: number; backdrop: "aligned" | "assumed" | "none" }>("live_capture_level", {
+      id,
+      layer,
+      classes,
+      screen: screen ?? null,
+      calibration: calibration ?? null,
+    }),
   uiPick: (id: string, x: number, y: number) => invoke<UiNode | null>("ui_pick", { id, x, y }),
   onRunProgress: (handler: (p: ImportProgress) => void): Promise<UnlistenFn> =>
     listen<ImportProgress>("run-progress", (e) => handler(e.payload)),

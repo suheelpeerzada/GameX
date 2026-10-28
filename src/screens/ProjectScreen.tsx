@@ -21,11 +21,14 @@ import Inspector from "../components/Inspector";
 import { api, formatBytes, pickPath } from "../lib/api";
 import { statusLabel } from "../lib/categories";
 import { projectFeatures } from "../lib/features";
+import { gx, type TranslationReport } from "../lib/gx";
+import ImportLoader from "../components/ImportLoader";
 
 // Loaded only when a project uses them (see lib/features.ts).
 const AiPanel = lazy(() => import("../components/AiPanel"));
 const BuildDialog = lazy(() => import("../components/BuildDialog"));
 const RunDialog = lazy(() => import("../components/RunDialog"));
+const ToolPrompt = lazy(() => import("../components/ToolPrompt"));
 const LiveView = lazy(() => import("../components/LiveView"));
 import { currentTheme, setTheme, type Theme } from "../lib/theme";
 import type { AiStatus, Category, EditState, GameObject, GameProject, ImportRecord, ModelInfo } from "../lib/types";
@@ -41,6 +44,16 @@ interface Props {
   focus: boolean;
   onToggleFocus: () => void;
   onOpenSettings: () => void;
+  /** Opens the visual editor on this game's layer. */
+  onEditVisually: (path: string, report?: TranslationReport) => void;
+  /** Bumped to open the Build dialog (the visual editor's "Export modified APK"). */
+  buildRequest?: number;
+  /** The game's name as the phone shows it (launcher label), if it has one. */
+  label?: string;
+  /** The top bar's mode tabs (the only nav): a tab here, or the visual editor (bumped `n`). */
+  modeRequest?: { mode: "editor" | "live" | "content" | "overview"; n: number };
+  /** This screen moved to another tab itself (search, the Run dialog...). */
+  onTabChange?: (tab: "content" | "live" | "overview") => void;
 }
 
 /** What the AI can read in a tab: the file shown and any selected text. */
@@ -56,12 +69,22 @@ function nameRoot(name: string): string | null {
   return root && root.length >= 3 ? root : null;
 }
 
-export default function ProjectScreen({ project, active: shown, focus, onToggleFocus, onOpenSettings }: Props) {
+export default function ProjectScreen({ project, active: shown, focus, onToggleFocus, onOpenSettings, onEditVisually, buildRequest = 0, label, modeRequest, onTabChange }: Props) {
+  const [layering, setLayering] = useState(false);
+  // A tool the layer needs first (GDRE Tools for exported Godot games).
+  const [needTool, setNeedTool] = useState<{ id: string; why: string } | null>(null);
   const [analysis, setAnalysis] = useState<GameProject | null>(null);
   const features = projectFeatures(project.container, analysis);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [tab, setTab] = useState<Tab>("content");
+  const [tab, setTabState] = useState<Tab>("content");
+  const tabChanged = useRef(onTabChange);
+  tabChanged.current = onTabChange;
+  const setTab = (t: Tab) => {
+    if (t === "live") setLiveMounted(true);
+    setTabState(t);
+    tabChanged.current?.(t);
+  };
   // The Live tab is set up the first time it's opened, then kept (its connection survives tab switches).
   const [liveMounted, setLiveMounted] = useState(false);
   // Open objects, like editor tabs: each keeps its state while in the background.
@@ -85,6 +108,19 @@ export default function ProjectScreen({ project, active: shown, focus, onToggleF
   const [aiFiles, setAiFiles] = useState<string[]>([]);
   const [aiStatus, setAiStatus] = useState<AiStatus | null>(null);
   const [models, setModels] = useState<ModelInfo[]>([]);
+
+  // The visual editor sent its changes into the game: show them, then build.
+  useEffect(() => {
+    if (!buildRequest) return;
+    api
+      .getEditState(project.id)
+      .then((state) => {
+        onEdited(state);
+        setBuilding(true);
+      })
+      .catch((e) => setError(String(e)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [buildRequest]);
 
   /** `changed`: the files the edit touched, when known. Open tabs reload only if they show one. */
   const onEdited = (state: EditState, changed?: string[]) => {
@@ -150,6 +186,37 @@ export default function ProjectScreen({ project, active: shown, focus, onToggleF
       setError(`Couldn't undo: ${e}`);
     }
   };
+
+  // Every game is edited visually on its layer: made the first time, then reopened.
+  const editVisually = async () => {
+    setError(null);
+    try {
+      const existing = await gx.layerForImport(project.id);
+      if (existing) return onEditVisually(existing);
+      setLayering(true);
+      const made = await gx.makeLayer(project.id);
+      onEditVisually(made.path, made.report);
+    } catch (e) {
+      const message = String(e);
+      const need = message.match(/needs-tool:([\w-]+)\|(.*)/);
+      if (need) setNeedTool({ id: need[1], why: need[2] });
+      else setError(message);
+    } finally {
+      setLayering(false);
+    }
+  };
+
+  // The top bar asked for the editor or the Live view.
+  useEffect(() => {
+    if (!modeRequest?.n) return;
+    if (modeRequest.mode === "editor") return void editVisually();
+    if (modeRequest.mode === "live" && !features.live) {
+      setTab("content");
+      return setError("Live Preview needs the game running on an emulator or phone with debugging, which this game's import doesn't allow.");
+    }
+    setTab(modeRequest.mode);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [modeRequest?.n]);
 
   // ZIP and folder imports: copy the files out with the edits applied.
   const exportFolder = async () => {
@@ -244,7 +311,7 @@ export default function ProjectScreen({ project, active: shown, focus, onToggleF
           <div className="project-avatar">{icon ? <img src={icon} alt="" /> : <Gamepad2 size={26} />}</div>
           <div>
             <div className="project-title">
-              <h1>{project.name}</h1>
+              <h1>{label || project.name}</h1>
               {busy ? (
                 <span className="status-badge working">Analyzing…</span>
               ) : analysis ? (
@@ -261,25 +328,6 @@ export default function ProjectScreen({ project, active: shown, focus, onToggleF
           </div>
         </div>
         <div className="head-actions">
-          <div className="segmented">
-            <button className={tab === "content" ? "active" : ""} onClick={() => setTab("content")}>
-              Content
-            </button>
-            {features.live && (
-              <button
-                className={tab === "live" ? "active" : ""}
-                onClick={() => {
-                  setLiveMounted(true);
-                  setTab("live");
-                }}
-              >
-                Live
-              </button>
-            )}
-            <button className={tab === "overview" ? "active" : ""} onClick={() => setTab("overview")}>
-              Overview
-            </button>
-          </div>
           <button className="icon-button" onClick={focusSearch} title="Search objects">
             <Search size={18} />
           </button>
@@ -302,6 +350,7 @@ export default function ProjectScreen({ project, active: shown, focus, onToggleF
           <button className="icon-button" onClick={toggleTheme} title={theme === "dark" ? "Light theme" : "Dark theme"}>
             {theme === "dark" ? <Sun size={18} /> : <Moon size={18} />}
           </button>
+          {layering && <span className="status-badge working">Opening the editor…</span>}
           {features.run && (
             <button
               className="build-button run-button"
@@ -335,6 +384,20 @@ export default function ProjectScreen({ project, active: shown, focus, onToggleF
       </header>
 
       {error && <div className="panel error project-error">{error}</div>}
+      {needTool && (
+        <Suspense fallback={null}>
+          <ToolPrompt
+            missing={[needTool.id]}
+            action="Editing this game visually"
+            onReady={() => {
+              setNeedTool(null);
+              editVisually();
+            }}
+            onCancel={() => setNeedTool(null)}
+          />
+        </Suspense>
+      )}
+      {layering && <ImportLoader name={project.name} current={{ stage: "layer", message: "Reading how the game builds its levels" }} />}
       <Suspense fallback={null}>
         {runMounted && (
           <RunDialog

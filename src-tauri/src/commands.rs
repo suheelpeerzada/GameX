@@ -49,11 +49,11 @@ impl AppState {
         }
     }
 
-    fn workspace(&self) -> Workspace {
+    pub(crate) fn workspace(&self) -> Workspace {
         Workspace::new(self.workspace_root.clone())
     }
 
-    fn settings(&self) -> Settings {
+    pub(crate) fn settings(&self) -> Settings {
         self.settings.lock().unwrap().clone()
     }
 
@@ -289,6 +289,30 @@ pub fn save_local_bytes(request: tauri::ipc::Request<'_>) -> Result<(), String> 
     let path = request.headers().get("gamex-path").ok_or("Missing the file path.")?;
     let path = crate::models::percent_decode(path.to_str().map_err(|e| e.to_string())?)?;
     std::fs::write(&path, bytes).map_err(|e| format!("Couldn't save {path}: {e}"))
+}
+
+#[derive(serde::Serialize)]
+pub struct GameIdentity {
+    /// The launcher label (what the phone shows under the icon); empty if none.
+    pub label: String,
+    pub icon: Option<String>,
+}
+
+/// Each game's launcher label and icon, by import ID, for the games list.
+#[tauri::command]
+pub async fn game_identities(state: State<'_, AppState>, ids: Vec<String>) -> Result<std::collections::HashMap<String, GameIdentity>, String> {
+    let workspace = state.workspace();
+    tauri::async_runtime::spawn_blocking(move || {
+        ids.into_iter()
+            .filter_map(|id| {
+                let dir = workspace.project_dir(&id).ok()?;
+                let (label, icon) = rebuild::identity(&dir);
+                Some((id, GameIdentity { label, icon }))
+            })
+            .collect()
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 /// Current name, package, version, icon and permissions for the build dialog.
@@ -863,6 +887,37 @@ pub async fn live_keep(
 }
 
 /// Where the live objects of these classes are, for the picker.
+/// Captures the level the running game is showing into its layer (the GameX
+/// project at `layer`): every object of `classes` where it is now, as a new scene.
+#[tauri::command]
+pub async fn live_capture_level(
+    state: State<'_, AppState>,
+    id: String,
+    layer: String,
+    classes: Vec<String>,
+    // The game's screen as PNG (base64), and the picker's calibration [ax, bx, ay, by].
+    screen: Option<String>,
+    calibration: Option<[f64; 4]>,
+) -> Result<crate::gx::generic::Captured, String> {
+    use base64::Engine as _;
+    let lives = state.lives.clone();
+    let snapshot = screen
+        .and_then(|s| base64::engine::general_purpose::STANDARD.decode(s.trim_start_matches("data:image/png;base64,")).ok())
+        .map(|png| crate::gx::generic::Snapshot { png, calibration });
+    tauri::async_runtime::spawn_blocking(move || {
+        let positions = with_live(&lives, &id, |s| s.positions(&classes, 5000).map_err(|e| e.to_string()))?;
+        if positions.is_empty() {
+            return Err("No objects with a position were found in the game right now. Start a level, then capture.".into());
+        }
+        let dir = std::path::PathBuf::from(&layer);
+        let ppu = crate::gx::project::open(&dir).map(|p| p.info.settings.pixels_per_unit).unwrap_or(100.0).max(1.0);
+        let list: Vec<(String, f64, f64)> = positions.into_iter().map(|p| (p.class, p.x, p.y)).collect();
+        crate::gx::generic::capture(&dir, &list, ppu, snapshot.as_ref()).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 pub async fn live_positions(
     state: State<'_, AppState>,

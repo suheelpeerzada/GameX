@@ -192,6 +192,9 @@ pub struct SerializedFile {
     pub little: bool,
     pub type_trees: bool,
     pub objects: Vec<ObjectInfo>,
+    /// Other files this one's references point into (file ID 1 is the first),
+    /// as Unity names them: `sharedassets0.assets`, `library/unity default resources`...
+    pub externals: Vec<String>,
 }
 
 /// `2021.3.11f1` -> (2021, 3)
@@ -251,7 +254,8 @@ impl SerializedFile {
             types.push(class_id);
         }
         let objects = read_objects(&mut r, format, data_offset, &types)?;
-        Ok(SerializedFile { format, unity_version, little, type_trees, objects })
+        let externals = read_externals(&mut r, format).unwrap_or_default();
+        Ok(SerializedFile { format, unity_version, little, type_trees, objects, externals })
     }
 
     fn read_with_trees(
@@ -284,12 +288,39 @@ impl SerializedFile {
             types.push(class_id);
         }
         let objects = read_objects(&mut r, format, data_offset, &types)?;
-        Ok(SerializedFile { format, unity_version, little, type_trees: true, objects })
+        let externals = read_externals(&mut r, format).unwrap_or_default();
+        Ok(SerializedFile { format, unity_version, little, type_trees: true, objects, externals })
     }
 
     pub fn version(&self) -> (u32, u32) {
         version_of(&self.unity_version)
     }
+}
+
+/// The script types, then the external files, after the object table.
+fn read_externals(r: &mut Reader, format: u32) -> io::Result<Vec<String>> {
+    if format >= 11 {
+        for _ in 0..r.count(8)? {
+            r.i32()?;
+            if format >= 14 {
+                r.align();
+                r.i64()?;
+            } else {
+                r.i32()?;
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for _ in 0..r.count(5)? {
+        if format >= 6 {
+            r.cstr()?;
+        }
+        if format >= 5 {
+            r.skip(20)?; // GUID, type
+        }
+        out.push(r.cstr()?);
+    }
+    Ok(out)
 }
 
 fn read_objects(r: &mut Reader, format: u32, data_offset: u64, types: &[i32]) -> io::Result<Vec<ObjectInfo>> {
@@ -859,6 +890,11 @@ pub mod tests {
 
     /// A format-22 serialized file holding these objects (class ID, data).
     pub fn serialized_file(objects: &[(i64, i32, Vec<u8>)]) -> Vec<u8> {
+        serialized_file_with(objects, &[])
+    }
+
+    /// The same, referring to other files (file ID 1 is the first).
+    pub fn serialized_file_with(objects: &[(i64, i32, Vec<u8>)], externals: &[&str]) -> Vec<u8> {
         let mut meta = W::default();
         meta.0.extend_from_slice(b"2021.3.11f1\0");
         meta.i32(13).u8(0);
@@ -872,6 +908,10 @@ pub mod tests {
         for c in &classes {
             meta.i32(*c).u8(0);
             meta.0.extend_from_slice(&(-1i16).to_le_bytes());
+            // MonoBehaviour types also carry their script's hash.
+            if *c == 114 {
+                meta.0.extend_from_slice(&[0; 16]);
+            }
             meta.0.extend_from_slice(&[0; 16]);
         }
         meta.i32(objects.len() as i32);
@@ -892,7 +932,16 @@ pub mod tests {
             meta.0.extend_from_slice(&start.to_le_bytes());
             meta.u32(size).i32(ti);
         }
-        meta.i32(0).i32(0).i32(0).u8(0); // script types, externals, ref types, user info
+        meta.i32(0); // script types
+        meta.i32(externals.len() as i32);
+        for e in externals {
+            meta.u8(0);
+            meta.0.extend_from_slice(&[0; 16]);
+            meta.i32(0);
+            meta.0.extend_from_slice(e.as_bytes());
+            meta.u8(0);
+        }
+        meta.i32(0).u8(0); // ref types, user info
         let mut data_offset = header_len + meta.0.len();
         data_offset = (data_offset + 15) & !15;
         let total = data_offset + data.len();

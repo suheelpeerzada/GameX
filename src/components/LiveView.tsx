@@ -1,7 +1,8 @@
-import { Activity, Crosshair, Eye, EyeOff, Link2, Link2Off, Pin, Play, RefreshCw, Search } from "lucide-react";
+import { Activity, Camera, Crosshair, Eye, EyeOff, Link2, Link2Off, Pin, Play, RefreshCw, Search } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../lib/api";
 import { categories } from "../lib/categories";
+import { gx } from "../lib/gx";
 import { type LiveChange, markKept, recordLiveChange } from "../lib/livechanges";
 import { type Calibration, type CalibrationPoint, classGroups, nearest, solveCalibration, toScreen } from "../lib/picker";
 import type { Category, EditState, GameObject, KeptChange, LiveClassCount, LiveField, LiveInstance, LiveObject, LivePosition, UiNode } from "../lib/types";
@@ -101,6 +102,8 @@ export default function LiveView({ projectId, objects, onOpenObject, onRun, onEd
   const [calibrating, setCalibrating] = useState(false);
   const [uiHit, setUiHit] = useState<UiNode | null>(null);
   const [pickNote, setPickNote] = useState<string | null>(null);
+  const [capturing, setCapturing] = useState(false);
+  const [captured, setCaptured] = useState<string | null>(null);
   // Classes whose objects aren't drawn over the screen (chosen by the user).
   const [hidden, setHidden] = useState<Set<string>>(() => loadHidden(projectId));
   const [showClasses, setShowClasses] = useState(false);
@@ -122,6 +125,37 @@ export default function LiveView({ projectId, objects, onOpenObject, onRun, onEd
     [objects],
   );
   const classNames = useMemo(() => classes.map((c) => c.id.slice("class:".length)), [classes]);
+
+  /** The level on screen now, into the game's layer (made first if needed). */
+  const captureLevel = async () => {
+    setCapturing(true);
+    try {
+      const layer = (await gx.layerForImport(projectId)) ?? (await gx.makeLayer(projectId)).path;
+      // The game's screen right now, as the level's backdrop (when the mirror is showing it).
+      const canvas = document.querySelector<HTMLCanvasElement>(`canvas[data-game-screen="${CSS.escape(projectId)}"]`);
+      let screen: string | null = null;
+      try {
+        screen = canvas && canvas.width > 1 ? canvas.toDataURL("image/png") : null;
+      } catch {
+        screen = null;
+      }
+      const c = calibrated.calibration;
+      const result = await api.liveCaptureLevel(projectId, layer, liveClasses, screen, c ? [c.ax, c.bx, c.ay, c.by] : null);
+      const back =
+        result.backdrop === "aligned"
+          ? " with the game's screen behind them"
+          : result.backdrop === "assumed"
+            ? " with the game's screen behind them (not lined up yet: calibrate the picker on two objects, then capture again)"
+            : " (start the screen mirror to also get the level's picture)";
+      setCaptured(
+        `Captured ${result.objects} object${result.objects === 1 ? "" : "s"} (${result.matched} placed as things)${back} into the scene "${result.scene}". Open the Editor to see it.`,
+      );
+    } catch (e) {
+      fail(e);
+    } finally {
+      setCapturing(false);
+    }
+  };
 
   const fail = (e: unknown) => {
     const message = String(e);
@@ -589,6 +623,9 @@ export default function LiveView({ projectId, objects, onOpenObject, onRun, onEd
         <label className="small">
           <input type="checkbox" checked={autoRefresh} onChange={(e) => setAutoRefresh(e.target.checked)} /> Live refresh
         </label>
+        <button onClick={captureLevel} disabled={capturing || liveClasses.length === 0} title="Put every object where it is now into the game's visual layer, as a new scene">
+          <Camera size={14} /> {capturing ? "Capturing…" : "Capture level"}
+        </button>
         <button onClick={() => { refreshCounts(); refreshInstances(); refreshObject(); }} title="Refresh now">
           <RefreshCw size={14} />
         </button>
@@ -596,6 +633,14 @@ export default function LiveView({ projectId, objects, onOpenObject, onRun, onEd
           <Link2Off size={14} /> Disconnect
         </button>
       </div>
+      {captured && (
+        <div className="notice small">
+          {captured}{" "}
+          <button className="link" onClick={() => setCaptured(null)}>
+            Dismiss
+          </button>
+        </div>
+      )}
       {error && (
         <div className="panel error small live-error">
           {error} <button className="link" onClick={() => setError(null)}>Dismiss</button>

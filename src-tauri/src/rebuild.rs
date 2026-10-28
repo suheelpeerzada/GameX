@@ -129,6 +129,19 @@ pub fn build_info(project_root: &Path, record: &ImportRecord, settings: &Setting
     }
 }
 
+/// What the phone shows for the game: the launcher's label and icon (data URL).
+/// Empty label when the game isn't a decoded APK.
+pub fn identity(project_root: &Path) -> (String, Option<String>) {
+    let store = EditStore::new(project_root);
+    let manifest = read_current(&store, "apktool/AndroidManifest.xml");
+    let app = first_open_tag(&manifest, "<application").map(|(s, e)| &manifest[s..e]).unwrap_or("");
+    let launcher = launcher_tags(&manifest).first().map(|&(s, e)| &manifest[s..e]).unwrap_or("");
+    let label = attr(launcher, "android:label").or_else(|| attr(app, "android:label")).unwrap_or("");
+    let icon_ref = attr(launcher, "android:icon").or_else(|| attr(app, "android:icon"));
+    let name = if label.is_empty() { String::new() } else { resolve_string(&store, label) };
+    (name.trim().to_string(), icon_ref.and_then(|r| icon_data_url(project_root, &store, r)))
+}
+
 /// `@string/app_name` -> its text in res/values/strings.xml.
 fn resolve_string(store: &EditStore, label: &str) -> String {
     let Some(name) = label.strip_prefix("@string/") else {

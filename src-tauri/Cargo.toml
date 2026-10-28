@@ -1,6 +1,6 @@
 [package]
 name = "gamex"
-version = "0.9.4"
+version = "1.0.0"
 description = "Import offline games and edit their content in one universal editor"
 edition = "2021"
 
@@ -24,6 +24,7 @@ walkdir = "2"
 uuid = { version = "1", features = ["v4"] }
 imagesize = "0.13"
 base64 = "0.22"
+flate2 = "1"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 keyring = { version = "3", features = ["windows-native"] }
 

@@ -59,15 +59,15 @@ pub struct Scene {
 }
 
 /// One `[section attr=value ...]` with its properties.
-struct Section {
-    tag: String,
-    attrs: Vec<(String, String)>,
-    line: usize,
-    properties: Vec<SceneProperty>,
+pub(crate) struct Section {
+    pub tag: String,
+    pub attrs: Vec<(String, String)>,
+    pub line: usize,
+    pub properties: Vec<SceneProperty>,
 }
 
 impl Section {
-    fn attr(&self, key: &str) -> Option<&str> {
+    pub fn attr(&self, key: &str) -> Option<&str> {
         self.attrs.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
     }
 }
@@ -136,7 +136,7 @@ fn bracket_delta(line: &str) -> i32 {
     depth
 }
 
-fn parse_sections(text: &str) -> Vec<Section> {
+pub(crate) fn parse_sections(text: &str) -> Vec<Section> {
     let lines: Vec<&str> = text.lines().collect();
     let mut sections: Vec<Section> = Vec::new();
     let mut i = 0;

@@ -4,6 +4,7 @@ pub mod device;
 pub mod analyzer;
 mod commands;
 pub mod edits;
+pub mod gx;
 pub mod import;
 pub mod jdwp;
 pub mod keep;
@@ -35,6 +36,28 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::import_game,
+            gx::commands::gx_projects_root,
+            gx::commands::gx_list_projects,
+            gx::commands::gx_create_project,
+            gx::commands::gx_open_project,
+            gx::commands::gx_load_scene,
+            gx::commands::gx_load_thing,
+            gx::commands::gx_load_behavior,
+            gx::commands::gx_save_scene,
+            gx::commands::gx_save_thing,
+            gx::commands::gx_save_behavior,
+            gx::commands::gx_translate_godot,
+            gx::commands::gx_layer_for_import,
+            gx::commands::gx_make_layer,
+            gx::commands::gx_add_game,
+            gx::commands::gx_send_to_game,
+            gx::commands::gx_replace_asset,
+            commands::live_capture_level,
+            commands::game_identities,
+            gx::commands::gx_read_asset,
+            gx::commands::gx_delete_scene,
+            gx::commands::gx_save_info,
+            gx::commands::gx_undo,
             commands::list_projects,
             commands::get_project,
             commands::delete_project,

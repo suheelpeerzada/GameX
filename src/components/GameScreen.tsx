@@ -236,6 +236,7 @@ export default function GameScreen({ projectId, visible, pick }: { projectId: st
       <div className="game-screen-body">
         <canvas
           ref={canvasRef}
+          data-game-screen={projectId}
           className={picking ? "game-canvas picking" : "game-canvas"}
           width={setup?.width ?? 360}
           height={setup?.height ?? 640}

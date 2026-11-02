@@ -20,7 +20,7 @@ fn shape(shape: ShapeKind, size: [f32; 3], color: &str) -> Part {
 }
 
 fn collider(shape: ShapeKind, size: [f32; 3], body: Body) -> Part {
-    Part::Collider { shape, size, body, trigger: false }
+    Part::Collider { shape, size, body, trigger: false, boxes: Vec::new() }
 }
 
 fn arg_prop(name: &str) -> Arg {
@@ -110,7 +110,7 @@ fn things() -> Vec<Thing> {
         vec![Property { name: "value".into(), value: Value::Integer(1), unit: Some("points".into()), description: None }],
         vec![
             shape(ShapeKind::Cylinder, [0.6, 0.1, 0.6], "#e8b830"),
-            Part::Collider { shape: ShapeKind::Cylinder, size: [0.6, 0.1, 0.6], body: Body::Static, trigger: true },
+            Part::Collider { shape: ShapeKind::Cylinder, size: [0.6, 0.1, 0.6], body: Body::Static, trigger: true, boxes: Vec::new() },
         ],
     );
     coin.behaviors = uses("pickup");

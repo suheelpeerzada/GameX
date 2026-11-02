@@ -1,7 +1,9 @@
 import { Channel } from "@tauri-apps/api/core";
-import { ArrowLeft, Circle, Crosshair, MonitorPlay, MonitorStop } from "lucide-react";
+import { ArrowLeft, Circle, Crosshair, MonitorPlay, MonitorStop, Pause, Play } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { api } from "../lib/api";
+import { errorText } from "../lib/errors";
+import ErrorText from "./ErrorText";
 
 interface Setup {
   codec: string;
@@ -33,12 +35,65 @@ export interface PickMode {
   onPick: (p: { x: number; y: number }) => void;
 }
 
+/** A sprite's box over the screen (device pixels), from the draw recorder. */
+export interface SceneBox {
+  key: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  /** Colours the box: character, item, object, tile, sprite, ui, background. */
+  kind: string;
+  label: string;
+  selected?: boolean;
+  player?: boolean;
+  /** Can be dragged to move it (the game is paused and it's one of its objects). */
+  movable?: boolean;
+}
+
+export interface BoxesMode {
+  boxes: SceneBox[];
+  onSelect: (key: string) => void;
+  /** A box was dragged by (dx, dy) device pixels. */
+  onMove?: (key: string, dx: number, dy: number) => void;
+}
+
+export type Arrow = "up" | "down" | "left" | "right";
+
+const ARROWS: Record<string, Arrow> = {
+  ArrowUp: "up",
+  ArrowDown: "down",
+  ArrowLeft: "left",
+  ArrowRight: "right",
+  w: "up",
+  s: "down",
+  a: "left",
+  d: "right",
+};
+
 /**
  * The running game's screen, streamed from the emulator (H.264 decoded with
  * WebCodecs). Clicks, drags and long presses on it are sent back as touches.
  */
 /** `visible`: stream only while the Live tab is on screen. */
-export default function GameScreen({ projectId, visible, pick }: { projectId: string; visible: boolean; pick?: PickMode }) {
+export default function GameScreen({
+  projectId,
+  visible,
+  pick,
+  boxes,
+  pause,
+  onArrow,
+}: {
+  projectId: string;
+  visible: boolean;
+  pick?: PickMode;
+  /** Every sprite's box, when GameX records the game's drawing. */
+  boxes?: BoxesMode | null;
+  /** Stops time in the game for editing. */
+  pause?: { paused: boolean; onToggle: () => void; disabled?: boolean };
+  /** Arrow keys / WASD while the screen is shown: steer the player. */
+  onArrow?: (dir: Arrow) => void;
+}) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [setup, setSetup] = useState<Setup | null>(null);
   const [streaming, setStreaming] = useState(false);
@@ -48,6 +103,8 @@ export default function GameScreen({ projectId, visible, pick }: { projectId: st
   // Where the canvas sits in its box, for the pick overlay.
   const [canvasBox, setCanvasBox] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
   const picking = !!pick?.active;
+  // A box being dragged: where the pointer started and how far it went (device pixels).
+  const [drag, setDrag] = useState<{ key: string; x: number; y: number; dx: number; dy: number } | null>(null);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -73,6 +130,22 @@ export default function GameScreen({ projectId, visible, pick }: { projectId: st
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [visible, togglePick]);
+
+  // Arrow keys and WASD steer the player, unless typing somewhere.
+  useEffect(() => {
+    if (!visible || !onArrow) return;
+    const onKey = (e: KeyboardEvent) => {
+      const el = e.target as HTMLElement | null;
+      if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT" || el.isContentEditable)) return;
+      if (e.ctrlKey || e.altKey || e.metaKey) return;
+      const dir = ARROWS[e.key.length === 1 ? e.key.toLowerCase() : e.key];
+      if (!dir) return;
+      e.preventDefault();
+      onArrow(dir);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [visible, onArrow]);
 
   const stop = () => {
     api.mirrorStop(projectId);
@@ -153,7 +226,7 @@ export default function GameScreen({ projectId, visible, pick }: { projectId: st
       await api.mirrorStart(projectId, channel);
       setStreaming(true);
     } catch (e) {
-      setError(String(e));
+      setError(errorText(e));
     }
   };
 
@@ -199,7 +272,7 @@ export default function GameScreen({ projectId, visible, pick }: { projectId: st
     const held = Math.round(performance.now() - start.t);
     const moved = Math.hypot(end.x - start.x, end.y - start.y) > 12;
     const to = moved ? end : start;
-    api.mirrorTouch(projectId, start.x, start.y, to.x, to.y, Math.max(held, 60)).catch((err) => setError(String(err)));
+    api.mirrorTouch(projectId, start.x, start.y, to.x, to.y, Math.max(held, 60)).catch((err) => setError(errorText(err)));
   };
 
   return (
@@ -207,6 +280,16 @@ export default function GameScreen({ projectId, visible, pick }: { projectId: st
       <div className="game-screen-head">
         <strong>Game</strong>
         <span className="status-spacer" />
+        {pause && (
+          <button
+            className={pause.paused ? "icon-button small-icon active" : "icon-button small-icon"}
+            title={pause.paused ? "Resume the game" : "Pause the game: time stops so you can look and edit"}
+            onClick={pause.onToggle}
+            disabled={pause.disabled}
+          >
+            {pause.paused ? <Play size={15} /> : <Pause size={15} />}
+          </button>
+        )}
         {pick && (
           <button
             className={picking ? "icon-button small-icon active" : "icon-button small-icon"}
@@ -282,13 +365,66 @@ export default function GameScreen({ projectId, visible, pick }: { projectId: st
               ))}
           </svg>
         )}
+        {boxes && !picking && setup && canvasBox && (
+          <svg
+            className="rec-overlay"
+            style={canvasBox}
+            viewBox={`0 0 ${setup.deviceWidth} ${setup.deviceHeight}`}
+            preserveAspectRatio="none"
+            onPointerMove={(e) => {
+              if (!drag) return;
+              const p = toDevice(e);
+              if (p) setDrag({ ...drag, dx: p.x - drag.x, dy: p.y - drag.y });
+            }}
+            onPointerUp={() => {
+              if (!drag) return;
+              if (Math.abs(drag.dx) + Math.abs(drag.dy) > 2) boxes.onMove?.(drag.key, drag.dx, drag.dy);
+              setDrag(null);
+            }}
+          >
+            {boxes.boxes.map((b) => {
+              const off = drag?.key === b.key ? drag : null;
+              const cls = `rec-box kind-${b.kind}${b.selected ? " selected" : ""}${b.player ? " player" : ""}${b.movable ? " movable" : ""}`;
+              return (
+                <g key={b.key} className={cls}>
+                  <rect
+                    x={b.x + (off?.dx ?? 0)}
+                    y={b.y + (off?.dy ?? 0)}
+                    width={Math.max(b.w, 2)}
+                    height={Math.max(b.h, 2)}
+                    onPointerDown={(e) => {
+                      e.stopPropagation();
+                      boxes.onSelect(b.key);
+                      const p = toDevice(e);
+                      if (b.movable && p) {
+                        (e.currentTarget.ownerSVGElement ?? e.currentTarget).setPointerCapture(e.pointerId);
+                        setDrag({ key: b.key, x: p.x, y: p.y, dx: 0, dy: 0 });
+                      }
+                    }}
+                  >
+                    <title>{b.label}</title>
+                  </rect>
+                  {(b.selected || b.player) && (
+                    <text x={b.x + (off?.dx ?? 0)} y={b.y + (off?.dy ?? 0) - 6} fontSize={setup.deviceWidth / 30}>
+                      {b.label}
+                    </text>
+                  )}
+                </g>
+              );
+            })}
+          </svg>
+        )}
         {!setup && !error && <div className="game-screen-note muted small">Starting the screen…</div>}
-        {error && <div className="game-screen-note small error-text">{error}</div>}
+        {error && <div className="game-screen-note small error-text"><ErrorText text={error} /></div>}
       </div>
       <div className="muted tiny game-screen-tip">
         {picking
           ? "Pick mode: hover to find objects, click to select one. Taps aren't sent to the game (Ctrl+Shift+C to leave)."
-          : "Click to tap, drag to swipe, hold for a long press. The screen updates when the game draws something new."}
+          : pause?.paused
+            ? "Paused: time stands still in the game. Click a box to inspect it; drag one of the game's objects to move it."
+            : boxes
+              ? "Click a box to inspect it, or the game to tap it. Arrow keys / WASD steer the player."
+              : "Click to tap, drag to swipe, hold for a long press. The screen updates when the game draws something new."}
       </div>
     </div>
   );

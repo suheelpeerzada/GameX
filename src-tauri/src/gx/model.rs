@@ -274,6 +274,11 @@ pub enum Part {
         size: Option<[f32; 2]>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         flip_x: bool,
+        /// An animation: the images shown in turn (the first is `asset`), `fps` a second.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        frames: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fps: Option<f32>,
     },
     Collider {
         shape: ShapeKind,
@@ -283,6 +288,11 @@ pub enum Part {
         /// Detects overlaps without blocking.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         trigger: bool,
+        /// A shape made of boxes (walls and floors read from a mesh), each
+        /// `[min x, y, z, max x, y, z]` in the entity's own space. When there are
+        /// any, they are what blocks, and `size` is just the space they fill.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        boxes: Vec<[f32; 6]>,
     },
     Light {
         kind: LightKind,
@@ -348,7 +358,8 @@ impl Part {
     /// The asset files this part uses.
     pub fn assets(&self) -> Vec<&str> {
         match self {
-            Part::Model { asset } | Part::Sprite { asset, .. } | Part::Sound { asset, .. } => vec![asset],
+            Part::Sprite { asset, frames, .. } => std::iter::once(asset).chain(frames).map(String::as_str).collect(),
+            Part::Model { asset } | Part::Sound { asset, .. } => vec![asset],
             Part::Tiles { sheets, .. } => sheets.iter().map(|s| s.asset.as_str()).collect(),
             _ => Vec::new(),
         }
@@ -554,7 +565,7 @@ mod tests {
     fn parts_are_tagged_by_type() {
         let light: Part = serde_json::from_value(json!({"type": "light", "kind": "point", "color": "#ffeecc"})).unwrap();
         assert_eq!(light, Part::Light { kind: LightKind::Point, color: "#ffeecc".into(), intensity: 1.0, range: None });
-        let sprite = Part::Sprite { asset: "sprites/hero.png".into(), frame: None, size: None, flip_x: true };
+        let sprite = Part::Sprite { asset: "sprites/hero.png".into(), frame: None, size: None, flip_x: true, frames: Vec::new(), fps: None };
         assert_eq!(serde_json::to_value(&sprite).unwrap(), json!({"type": "sprite", "asset": "sprites/hero.png", "flipX": true}));
     }
 }

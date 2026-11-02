@@ -1,7 +1,11 @@
-import { Activity, Play, RefreshCw, Smartphone, Square } from "lucide-react";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { Activity, Download, ExternalLink, Play, RefreshCw, Smartphone, Square } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../lib/api";
-import type { RunOptions, RunStatus, RunTarget } from "../lib/types";
+import type { RunOptions, RunStatus, RunTarget, ToolInfo, ToolProgress } from "../lib/types";
+import { installTool, ProgressBar } from "./ToolsPanel";
+import { errorText } from "../lib/errors";
+import ErrorText from "./ErrorText";
 
 interface Props {
   projectId: string;
@@ -87,7 +91,7 @@ export default function RunDialog({ projectId, open, onClose, onRunning, onOpenS
       await api.runEnableAdb(index);
       await refresh();
     } catch (e) {
-      setProblem({ kind: "error", message: String(e) });
+      setProblem({ kind: "error", message: errorText(e) });
       setBusy(false);
       return;
     }
@@ -154,19 +158,7 @@ export default function RunDialog({ projectId, open, onClose, onRunning, onOpenS
         )}
 
         {targets !== null && targets.length === 0 ? (
-          <div className="panel">
-            <p>No emulator or phone was found.</p>
-            <p className="muted small">
-              Install LDPlayer (or Google's Android Emulator), or connect a phone with USB debugging and install Android
-              platform tools. All are under Settings → Tools.
-            </p>
-            <div className="row">
-              <button className="primary" onClick={onOpenSettings}>
-                Open Settings → Tools
-              </button>
-              <button onClick={refresh}>Look again</button>
-            </div>
-          </div>
+          <EmulatorPicker onInstalled={refresh} onOpenSettings={onOpenSettings} />
         ) : (
           <div className="form">
             <label className="field">
@@ -250,7 +242,7 @@ export default function RunDialog({ projectId, open, onClose, onRunning, onOpenS
             </button>
           </div>
         )}
-        {problem?.kind === "error" && <div className="panel error small">{problem.message}</div>}
+        {problem?.kind === "error" && <div className="panel error small"><ErrorText text={problem.message} /></div>}
 
         <div className="modal-actions">
           <span className="muted tiny run-note">
@@ -265,6 +257,86 @@ export default function RunDialog({ projectId, open, onClose, onRunning, onOpenS
             {busy ? "Working…" : running ? "Run again" : "Run"}
           </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+/** The emulators GameX runs games on, in the order it suggests them. */
+const EMULATORS: { id: string; name: string; why: string; recommended?: boolean }[] = [
+  { id: "ldplayer", name: "LDPlayer", why: "Works best with GameX: it switches on what GameX needs for you.", recommended: true },
+  { id: "bluestacks", name: "BlueStacks", why: "A popular emulator; works too." },
+  { id: "android-emulator", name: "Google's Android Emulator", why: "Android's own emulator: bigger, and slower to start." },
+];
+
+/** No emulator yet: pick one (one is recommended) and install it, or use a phone. */
+function EmulatorPicker({ onInstalled, onOpenSettings }: { onInstalled: () => void; onOpenSettings: () => void }) {
+  const [tools, setTools] = useState<ToolInfo[]>([]);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [progress, setProgress] = useState<ToolProgress | undefined>();
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    api.toolsCatalog().then(setTools).catch(() => {});
+  }, []);
+
+  const get = async (id: string) => {
+    const tool = tools.find((t) => t.id === id);
+    if (!tool) return;
+    if (!tool.managed) return void openUrl(tool.homepage).catch(() => {});
+    setBusy(id);
+    setError(null);
+    try {
+      // The connection tools come with it, so GameX can talk to the emulator.
+      const adb = tools.find((t) => t.id === "platform-tools");
+      if (adb && !adb.installed && adb.managed) await installTool(adb.id, setProgress);
+      await installTool(id, setProgress);
+      onInstalled();
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <div className="panel emulator-picker">
+      <p>
+        <strong>The game needs an emulator</strong> (an Android phone on your PC) to run. Pick one:
+      </p>
+      <div className="task-cards">
+        {EMULATORS.map((e) => {
+          const tool = tools.find((t) => t.id === e.id);
+          return (
+            <button key={e.id} className="task-card" disabled={!tool || busy !== null} onClick={() => get(e.id)}>
+              <span className="task-title">
+                {e.name} {e.recommended && <span className="pill recommended">Recommended</span>}
+              </span>
+              <span className="muted small">{e.why}</span>
+              <span className="small">
+                {tool?.installed ? (
+                  "Installed: start it, then press Look again"
+                ) : tool?.managed ? (
+                  <>
+                    <Download size={12} /> Install ({tool.size})
+                  </>
+                ) : (
+                  <>
+                    <ExternalLink size={12} /> Get it from its website
+                  </>
+                )}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+      {busy && <ProgressBar progress={progress} />}
+      {error && <ErrorText text={error} />}
+      <p className="muted small">Or plug in an Android phone with USB debugging on.</p>
+      <div className="row">
+        <button className="primary" onClick={onInstalled}>
+          <RefreshCw size={14} /> Look again
+        </button>
+        <button onClick={onOpenSettings}>All tools (Settings)</button>
       </div>
     </div>
   );

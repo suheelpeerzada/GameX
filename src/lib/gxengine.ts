@@ -51,8 +51,10 @@ export interface Actor {
   damaged: boolean;
   /** Side view: 1 right, -1 left. 3D: turn about the up axis, in radians. */
   facing: number;
-  /** Where a patrol around the start point has got to. */
+  /** Where a patrol around the start point has got to (or the point of a recorded path). */
   phase: number;
+  /** The way it went in the original game (redrawn levels): it walks it again, there and back. */
+  path?: Vec3[];
   /** The way blocks asked it to move this step (along the ground). */
   want: Vec3 | null;
   /** Steps run. */
@@ -60,6 +62,10 @@ export interface Actor {
   /** Switched off in the editor (Behavior): moving, attacking. */
   still: boolean;
   harmless: boolean;
+  /** Steps it has lain still on the ground; resting bodies aren't moved until something comes near. */
+  rest: number;
+  /** The animation blocks asked for ("walk"); the Player picks one from its movement otherwise. */
+  anim?: string;
 }
 
 export type GameEvent =
@@ -145,6 +151,7 @@ export function actorBox(a: Actor): Box {
 export class Grid {
   private cells = new Map<string, Box[]>();
   private big: Box[] = [];
+  private all: Box[] = [];
   private flat: boolean;
   private size: number;
   constructor(flat: boolean, size = 4) {
@@ -157,6 +164,7 @@ export class Grid {
   }
 
   add(b: Box) {
+    this.all.push(b);
     const r = this.range(b);
     const count = r.reduce((n, [lo, hi]) => n * (hi - lo + 1), 1);
     if (count > 512) return void this.big.push(b);
@@ -168,8 +176,16 @@ export class Grid {
   }
 
   near(b: Box): Box[] {
+    const r = this.range(b);
+    // One cell (most small moves): its list as it is, no duplicates to drop.
+    if (r.every(([lo, hi]) => lo === hi)) {
+      const list = this.cells.get(r.map(([lo]) => lo).concat(this.flat ? [0] : []).join(","));
+      return list ? (this.big.length ? [...this.big, ...list] : list) : this.big;
+    }
+    // A huge box (or a long fall) spans more cells than there are boxes: check them all.
+    if (r.reduce((n, [lo, hi]) => n * (hi - lo + 1), 1) > 64) return this.all;
     const found = new Set<Box>(this.big);
-    this.each(this.range(b), (key) => this.cells.get(key)?.forEach((x) => found.add(x)));
+    this.each(r, (key) => this.cells.get(key)?.forEach((x) => found.add(x)));
     return [...found];
   }
 
@@ -197,6 +213,20 @@ export function colliderBox(part: Part & { type: "collider" }, t: Transform, fla
   const half = m.map((row) => row.reduce((sum, r, j) => sum + Math.abs(r) * local[j], 0)) as Vec3;
   if (flat) half[2] = DEEP;
   return { min: t.position.map((p, i) => p - half[i]) as Vec3, max: t.position.map((p, i) => p + half[i]) as Vec3 };
+}
+
+/** The world boxes that block for a collider: its walls and floors when it has them, else its one box. */
+export function colliderBoxes(part: Part & { type: "collider" }, t: Transform, flat: boolean): Box[] {
+  if (!part.boxes?.length) return [colliderBox(part, t, flat)];
+  const m = matrix(t.rotation);
+  return part.boxes.map((b) => {
+    const center = [0, 1, 2].map((k) => ((b[k] + b[k + 3]) / 2) * t.scale[k]);
+    const local = [0, 1, 2].map((k) => Math.max(Math.abs((b[k + 3] - b[k]) * t.scale[k]), 0.02) / 2);
+    const at = m.map((row, i) => t.position[i] + row.reduce((sum, r, j) => sum + r * center[j], 0));
+    const half = m.map((row) => row.reduce((sum, r, j) => sum + Math.abs(r) * local[j], 0));
+    if (flat) half[2] = DEEP;
+    return { min: at.map((p, i) => p - half[i]) as Vec3, max: at.map((p, i) => p + half[i]) as Vec3 };
+  });
 }
 
 /** Solid tiles as boxes, a row's neighbours merged into one. */
@@ -270,7 +300,9 @@ function isActor(e: Entity, things: Record<string, Thing>): boolean {
   if ((thing?.behaviors?.length ?? 0) > 0 || (e.behaviors?.length ?? 0) > 0) return true;
   // Its own colliders only: a level holding a coin isn't itself an actor.
   const own = [...partsOf(e, things), ...(thing?.children ?? []).flatMap((c) => colliders(c, things, IDENTITY))];
-  return own.some((c) => c.type === "collider" && (c.body !== "static" || !!c.trigger));
+  // A kinematic body shaped like a mesh (a floor, a wall) only moves when the game's code moves it,
+  // which GameX doesn't run yet: it stays part of the level.
+  return own.some((c) => c.type === "collider" && ((c.body !== "static" && !(c.body === "kinematic" && c.boxes?.length)) || !!c.trigger));
 }
 
 function roleOf(e: Entity, thing: Thing | undefined, cols: (Part & { type: "collider" })[]): ActorRole {
@@ -403,10 +435,12 @@ function makeActor(e: Entity, t: Transform, w: World): Actor {
     damaged: false,
     facing: w.flat ? 1 : 0,
     phase: 0,
+    path: recordedPath(partsOf(e, w.things)),
     want: null,
     age: 0,
     still: off.has("no-move"),
     harmless: off.has("no-attack"),
+    rest: 0,
   };
 }
 
@@ -470,11 +504,18 @@ export function createWorld(
         if (p.type === "camera") cameras.push({ at: [...xt.position] as Vec3, half: p.orthoSize, owner });
       }
     });
+  // What the level looks like (its pictures), for framing the 2D camera.
+  const looks: Box[] = [];
   for (const e of statics) {
     const t = transformOf(e);
     each(e, things, t, (x, xt) => {
       for (const p of partsOf(x, things)) {
-        if (p.type === "collider" && !p.trigger && !switches(x, things).has("no-collide")) w.statics.push(colliderBox(p, xt, flat));
+        if (p.type === "sprite" && x.active !== false) {
+          const [sw, sh] = p.size ?? [1, 1];
+          const [hx, hy] = [Math.abs(sw * xt.scale[0]) / 2, Math.abs(sh * xt.scale[1]) / 2];
+          looks.push({ min: [xt.position[0] - hx, xt.position[1] - hy, 0], max: [xt.position[0] + hx, xt.position[1] + hy, 0] });
+        }
+        if (p.type === "collider" && !p.trigger && !switches(x, things).has("no-collide")) w.statics.push(...colliderBoxes(p, xt, flat));
         if (p.type === "tiles") w.statics.push(...tileBoxes(p, xt));
       }
     });
@@ -488,14 +529,23 @@ export function createWorld(
   for (const b of w.statics) w.grid.add(b);
   for (const a of w.actors) if (a.gravity) settle(w, a);
 
-  w.player =
-    w.actors.find((a) => a.role === "player") ??
-    w.actors.find((a) => PLAYER_NAME.test(wordsOf(`${a.name} ${a.thing?.name ?? ""}`))) ??
-    w.actors.find((a) => a.thing?.kind === "character" && a.role !== "enemy");
+  // A level can hold switched-off copies of the player (for another moment of the game): the one switched on plays.
+  const players = [
+    (a: Actor) => a.role === "player",
+    (a: Actor) => PLAYER_NAME.test(wordsOf(`${a.name} ${a.thing?.name ?? ""}`)),
+    (a: Actor) => a.thing?.kind === "character" && a.role !== "enemy",
+  ];
+  // The role first, then the name: being switched on only decides between the same kind.
+  w.player = players.map((f) => w.actors.find((a) => a.alive && f(a)) ?? w.actors.find(f)).find(Boolean);
   const p = w.player;
   if (p) {
     p.role = "player";
     p.gravity = true;
+    // Only a switched-off player: the game turns it on itself (after an intro), so play starts with it on.
+    if (!p.alive) {
+      p.alive = true;
+      p.entity = { ...p.entity, active: true };
+    }
   }
 
   // Side view if there's ground under the player; otherwise seen from above.
@@ -530,8 +580,9 @@ export function createWorld(
   // The 2D camera: the scene's own, else everything (a one-screen game), else the player.
   if (flat) {
     const own = cameras.find((c) => c.owner && c.owner === p?.id) ?? cameras[0];
-    const size: [number, number] | undefined = all ? [all.max[0] - all.min[0], all.max[1] - all.min[1]] : undefined;
-    const middle: Vec3 = all ? [(all.min[0] + all.max[0]) / 2, (all.min[1] + all.max[1]) / 2, 0] : [0, 0, 0];
+    const seen = union([...(all ? [all] : []), ...looks]);
+    const size: [number, number] | undefined = seen ? [seen.max[0] - seen.min[0], seen.max[1] - seen.min[1]] : undefined;
+    const middle: Vec3 = seen ? [(seen.min[0] + seen.max[0]) / 2, (seen.min[1] + seen.max[1]) / 2, 0] : [0, 0, 0];
     const followHalf = p ? Math.min(6, Math.max(1.5, p.half[1] * 2 * 5)) : 5;
     if (own) w.view = { follow: !!own.owner && own.owner === p?.id, center: own.at, halfHeight: own.half ?? followHalf };
     else if (!p || (size && size[0] <= 16 && size[1] <= 16)) w.view = { follow: false, center: middle, size };
@@ -793,8 +844,13 @@ function action(w: World, a: Actor, run: BehaviorRun | undefined, b: Block, dt: 
       if (scene) w.events.push({ type: "scene", scene });
       return;
     }
+    case "playAnimation": {
+      const name = text(resolve(a, run, argOf(b, "animation", "name", "clip")));
+      if (name) a.anim = name;
+      return;
+    }
     default:
-      // playAnimation and blocks GameX doesn't know yet: nothing to do here.
+      // Blocks GameX doesn't know yet: nothing to do here.
       return;
   }
 }
@@ -866,8 +922,39 @@ function collect(w: World, item: Actor) {
   }
 }
 
+/** A "Recorded path" part's points ("x,y;x,y" in metres), if any. */
+function recordedPath(parts: Part[]): Vec3[] | undefined {
+  for (const p of parts) {
+    if (p.type !== "custom" || p.name !== "Recorded path") continue;
+    const v = p.values?.points;
+    if (v?.type !== "text") continue;
+    const points = v.value
+      .split(";")
+      .map((xy) => xy.split(",").map(Number))
+      .filter((xy) => xy.length >= 2 && xy.every(Number.isFinite))
+      .map(([x, y]) => [x, y, 0] as Vec3);
+    if (points.length >= 2) return points;
+  }
+  return undefined;
+}
+
+/** Walks a recorded path, there and back; `phase` counts points walked. */
+function followPath(w: World, a: Actor, path: Vec3[], speed: number, dt: number) {
+  const n = path.length;
+  const step = Math.floor(a.phase) % (2 * n - 2);
+  const index = step < n ? step : 2 * n - 2 - step;
+  const point = path[index];
+  const [i, j] = ground(w);
+  if (Math.hypot(point[i] - a.pos[i], point[j] - a.pos[j]) < 0.08) a.phase = Math.floor(a.phase) + 1;
+  seek(w, a, point, speed, dt);
+}
+
 /** What actors do when nobody gave them blocks. */
 function defaults(w: World, a: Actor, dt: number) {
+  if (a.path) {
+    const speed = findNumber(a.props, /^(walk_?|move_?)?speed$/i, /speed/i);
+    return followPath(w, a, a.path, speed ? Math.abs(metres(w, speed.value)) : 1.5, dt);
+  }
   if (a.role === "enemy") {
     const speed = findNumber(a.props, /^(walk_?|move_?)?speed$/i, /speed/i);
     patrol(w, a, speed ? Math.abs(metres(w, speed.value)) : 1.5, 3, dt);
@@ -916,9 +1003,9 @@ function settle(w: World, a: Actor) {
   }
 }
 
-/** Moves `a` by its velocity one axis at a time, stopping at solids. */
-function move(w: World, a: Actor, dt: number) {
-  const solidActors = w.actors.filter((x) => x.solid && x.alive && x !== a).map(actorBox);
+/** Moves `a` by its velocity one axis at a time, stopping at solids (`solids`: the solid actors). */
+function move(w: World, a: Actor, dt: number, solids: Actor[]) {
+  const solidActors = solids.filter((x) => x !== a && x.alive).map(actorBox);
   a.onGround = false;
   for (const axis of axesOf(w.flat)) {
     const d = a.vel[axis] * dt;
@@ -928,13 +1015,25 @@ function move(w: World, a: Actor, dt: number) {
     const after = actorBox(a);
     const sweep = union([before, after])!;
     let limit: number | null = null;
+    let top = -Infinity;
     for (const s of [...w.grid.near(sweep), ...solidActors]) {
       // Already inside it (placed overlapping): let it walk out.
       if (overlaps(before, s, w.flat) || !overlaps(after, s, w.flat)) continue;
       const edge = d > 0 ? s.min[axis] : s.max[axis];
       if (limit === null || (d > 0 ? edge < limit : edge > limit)) limit = edge;
+      top = Math.max(top, s.max[1]);
     }
     if (limit === null) continue;
+    // 3D: a low ledge (a stair, the edge of a floor) is stepped up onto, if there's room above it.
+    if (!w.flat && axis !== 1 && a.vel[1] <= 0.01) {
+      const rise = top - before.min[1];
+      if (rise > 0 && rise <= Math.min(0.5, Math.max(0.25, a.half[1] * 0.3))) {
+        a.pos[1] += rise + 0.001;
+        const lifted = actorBox(a);
+        if (![...w.grid.near(lifted), ...solidActors].some((s) => overlaps(lifted, s, w.flat) && !overlaps(before, s, w.flat))) continue;
+        a.pos[1] -= rise + 0.001;
+      }
+    }
     a.pos[axis] = d > 0 ? limit - a.offset[axis] - a.half[axis] : limit - a.offset[axis] + a.half[axis];
     a.vel[axis] = 0;
     if (axis === 1 && d < 0) a.onGround = true;
@@ -989,19 +1088,33 @@ export function step(w: World, input: Input, dt: number) {
 
   // Gravity and movement, in small steps so nothing passes through thin floors.
   const falling = new Map<Actor, number>();
+  const solids = actors.filter((a) => a.solid);
   for (const a of actors) {
     if (!a.alive) continue;
+    // Nothing to do for what stands still with no gravity, or has come to rest far from the player.
+    const still = a.vel.every((v) => v === 0);
+    if (still && !a.gravity) {
+      falling.set(a, 0);
+      continue;
+    }
+    if (a !== p && a.onGround && !a.want && Math.abs(a.vel[0]) < 0.01 && Math.abs(a.vel[2]) < 0.01) a.rest++;
+    else a.rest = 0;
+    if (a.rest > 30 && !(p && distance(a, p, w.flat) < 6)) {
+      falling.set(a, 0);
+      continue;
+    }
     if (a.gravity && w.gravity > 0) a.vel[1] = Math.max(a.vel[1] - w.gravity * dt, -50);
     falling.set(a, a.vel[1]);
     const fastest = Math.max(...a.vel.map(Math.abs)) * dt;
     const n = Math.min(8, Math.max(1, Math.ceil(fastest / 0.2)));
     let grounded = false;
     for (let s = 0; s < n; s++) {
-      move(w, a, dt / n);
+      move(w, a, dt / n, solids);
       grounded ||= a.onGround;
     }
     a.onGround = grounded;
-    if (a.pos[1] < w.floor) {
+    // Off the level: below everything, or far below where it started (fallen through the floor).
+    if (a.pos[1] < w.floor || a.pos[1] < a.start[1] - 100) {
       if (a === p) {
         // Off the level: back to the start, and it costs some health.
         a.pos = [...a.start] as Vec3;

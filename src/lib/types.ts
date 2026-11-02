@@ -29,14 +29,6 @@ export interface ImportProgress {
   message: string;
 }
 
-export interface ToolStatus {
-  id: string;
-  found: boolean;
-  path: string | null;
-  source: string | null;
-  note: string;
-}
-
 // Running games (src-tauri/src/device.rs)
 
 export interface RunTarget {
@@ -277,6 +269,48 @@ export interface BuildResult {
   sha256: string;
   package: string;
   editedFiles: number;
+  /** What adding GameX's draw recorder found (recording copies only). */
+  recorder?: { files: number; draws: number; frames: number };
+}
+
+/** A sprite on the game's screen as the draw recorder saw it (device pixels). */
+export interface RecBox {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  /** "object": one of the game's objects; else what GameX could tell from the drawing. */
+  kind: "object" | "tile" | "sprite" | "ui" | "background";
+  object?: string;
+  class?: string;
+  player: boolean;
+}
+
+export interface RecView {
+  /** The running game has GameX's recorder (it's a recording copy). */
+  recorder: boolean;
+  frame: number;
+  boxes: RecBox[];
+  /** The object the player controls: [object id, class]. */
+  player: [string, string] | null;
+  /** The player's object just appeared. */
+  spawned: boolean;
+  /** Sprites are matched to the game's objects. */
+  linked: boolean;
+  paused: boolean;
+  pictures: number;
+  missing: number;
+  level: { frames: number; pieces: number; objects: number } | null;
+}
+
+export interface RecSaved {
+  scene: string;
+  name: string;
+  tiles: number;
+  sprites: number;
+  objects: number;
+  player: string | null;
+  missing: number;
 }
 
 // AI assistant (src-tauri/src/ai/)

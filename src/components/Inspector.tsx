@@ -6,6 +6,9 @@ import type { Category, EditState, GameObject, Preview, References } from "../li
 import { CategoryIcon, ObjectIcon, UNEDITABLE_FORMATS, fileType, isImagePath } from "../lib/visuals";
 import { isModelPath } from "../lib/models";
 import EmbeddedMedia from "./EmbeddedMedia";
+import { errorText } from "../lib/errors";
+import ErrorText from "./ErrorText";
+import { CODE_FILE, readShowCode, useShowCode } from "../lib/advanced";
 // Only Godot text scenes use it.
 const SceneEditor = lazy(() => import("./SceneEditor"));
 
@@ -31,8 +34,8 @@ const TEXT_FILE = /\.(java|smali|kt|xml|json|ya?ml|txt|csv|ini|cfg|lua|js|ts|py|
 
 export default function Inspector(props: Props) {
   const { projectId, object, edited, revision, related, onOpen, onMove, onEdited, onContext } = props;
-  // The parent keeps one Inspector per tab, so this state lasts per tab.
-  const [file, setFile] = useState(object.sourceFiles[0] ?? null);
+  // The parent keeps one Inspector per tab, so this state lasts per tab. Code opens first only with "Show code" on.
+  const [file, setFile] = useState(visibleSources(object, readShowCode())[0] ?? null);
   // A line to scroll to in the preview (from a gameplay value).
   const [focusLine, setFocusLine] = useState<number | null>(null);
   const [section, setSection] = useState<Section>("details");
@@ -61,7 +64,7 @@ export default function Inspector(props: Props) {
     try {
       onEdited(await action());
     } catch (e) {
-      setError(String(e));
+      setError(errorText(e));
     }
   };
 
@@ -163,7 +166,7 @@ export default function Inspector(props: Props) {
               onRevert={() => run(() => api.revertFile(projectId, file))}
             />
           )}
-          {error && <div className="panel error small">{error}</div>}
+          {error && <div className="panel error small"><ErrorText text={error} /></div>}
           {file && file.endsWith(".tscn") && !editing && (
             <div className="segmented scene-switch">
               <button className={sceneView === "scene" ? "active" : ""} onClick={() => setSceneView("scene")}>
@@ -322,6 +325,12 @@ function Thumbnail({ projectId, path, revision }: { projectId: string; path: str
   return <span className="thumb">{src && <img src={src} alt="" />}</span>;
 }
 
+/** The files shown for an object: code ones only with "Show code" on, unless it's all code. */
+function visibleSources(object: GameObject, showCode: boolean): string[] {
+  const looks = object.sourceFiles.filter((f) => !CODE_FILE.test(f));
+  return showCode || looks.length === 0 ? object.sourceFiles : looks;
+}
+
 function DetailsSection(props: {
   object: GameObject;
   edited: Set<string>;
@@ -332,6 +341,9 @@ function DetailsSection(props: {
 }) {
   const { object, edited, related, onMove, onPick, onOpen } = props;
   const [relatedOpen, setRelatedOpen] = useState(true);
+  const [showCode] = useShowCode();
+  const sources = visibleSources(object, showCode);
+  const onlyCode = !showCode && sources.every((f) => CODE_FILE.test(f));
   const moved = object.category !== object.autoCategory;
   const confidence = Math.round(object.confidence * 100);
   const confidenceColor = confidence >= 70 ? "var(--ok)" : confidence >= 45 ? "var(--warn)" : "var(--bad)";
@@ -393,8 +405,9 @@ function DetailsSection(props: {
 
         <div className="card source-files">
           <h4>Source Files</h4>
+          {onlyCode && <p className="muted small">This is code. It can be read and changed here, but it's for people who know it.</p>}
           <ul>
-            {object.sourceFiles.map((f) => {
+            {sources.map((f) => {
               const { label, Icon } = fileType(f);
               return (
                 <li key={f}>
@@ -471,11 +484,11 @@ function ReferencesSection(props: { projectId: string; object: GameObject; onOpe
     api
       .getReferences(projectId, classFile)
       .then(setRefs)
-      .catch((e) => setError(String(e)));
+      .catch((e) => setError(errorText(e)));
   }, [projectId, classFile]);
 
   if (!classFile) return <p className="muted small">References are found for code classes only.</p>;
-  if (error) return <div className="panel error small">{error}</div>;
+  if (error) return <div className="panel error small"><ErrorText text={error} /></div>;
   if (!refs) return <p className="muted small">Searching the game's code…</p>;
   if (refs.items.length === 0) return <p className="muted small">No other class refers to this one directly.</p>;
 
@@ -614,7 +627,7 @@ function TextEditor(props: {
         setOriginal(t);
         setText(t);
       })
-      .catch((e) => setError(String(e)));
+      .catch((e) => setError(errorText(e)));
   }, [projectId, path]);
 
   const dirty = original !== null && text !== original;
@@ -626,7 +639,7 @@ function TextEditor(props: {
     try {
       props.onSaved(await api.saveTextFile(projectId, path, text));
     } catch (e) {
-      setError(String(e));
+      setError(errorText(e));
       setSaving(false);
     }
   };
@@ -639,7 +652,7 @@ function TextEditor(props: {
   if (error && original === null) {
     return (
       <div className="panel error small">
-        {error} <button onClick={props.onCancel}>Back</button>
+        <ErrorText text={error} /> <button onClick={props.onCancel}>Back</button>
       </div>
     );
   }
@@ -656,7 +669,7 @@ function TextEditor(props: {
           {dirty ? "Unsaved changes · Ctrl+S to save" : "No changes"} · the original is kept, and saving can be undone
         </span>
       </div>
-      {error && <div className="panel error small">{error}</div>}
+      {error && <div className="panel error small"><ErrorText text={error} /></div>}
       <textarea
         ref={area}
         className="code-editor"
@@ -721,13 +734,13 @@ function FilePreview({
     api
       .readPreview(projectId, path)
       .then((p) => current && setPreview(p))
-      .catch((e) => current && setError(String(e)));
+      .catch((e) => current && setError(errorText(e)));
     return () => {
       current = false;
     };
   }, [projectId, path]);
 
-  if (error) return <div className="preview muted">Couldn't open this file: {error}</div>;
+  if (error) return <div className="preview muted">Couldn't open this file: <ErrorText text={error} /></div>;
   if (!preview) return <div className="preview muted">Loading preview…</div>;
 
   switch (preview.type) {

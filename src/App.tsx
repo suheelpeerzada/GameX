@@ -1,5 +1,5 @@
 import { getVersion } from "@tauri-apps/api/app";
-import { Box, ChevronRight, ChevronsLeft, ChevronsRight, FolderOpen, Gamepad2, Home, Info, MonitorPlay, Play, Plus, Radio, Settings, Trash2 } from "lucide-react";
+import { Box, ChevronRight, ChevronsLeft, ChevronsRight, FolderOpen, Gamepad2, HelpCircle, Home, Info, MonitorPlay, Plus, Radio, Settings, Trash2 } from "lucide-react";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import logo from "./assets/logo.png";
 import { api, inDesktopApp } from "./lib/api";
@@ -8,6 +8,9 @@ import type { ImportRecord } from "./lib/types";
 import { containerLongLabel } from "./lib/visuals";
 import ImportScreen from "./screens/ImportScreen";
 import ProjectScreen from "./screens/ProjectScreen";
+import UpdateNotice from "./components/UpdateNotice";
+import HelpPanel, { openHelp } from "./components/HelpPanel";
+import { errorText } from "./lib/errors";
 
 // Loaded when first visited.
 const AboutScreen = lazy(() => import("./screens/AboutScreen"));
@@ -62,7 +65,7 @@ export default function App() {
   // The top bar asks a game's screen for its editor or Live view.
   const [modeRequest, setModeRequest] = useState<{ id: string; mode: "editor" | "live" | "content" | "overview"; n: number }>({ id: "", mode: "editor", n: 0 });
   // The visual editor, open on one imported game's layer (kept while you visit other screens).
-  const [editing, setEditing] = useState<{ game: string; path: string; report?: TranslationReport } | null>(null);
+  const [editing, setEditing] = useState<{ game: string; path: string; report?: TranslationReport; focus?: { scene: string; n: number } } | null>(null);
   // The games in the open layer (their IDs there), and requests to it.
   const [layerGames, setLayerGames] = useState<string[]>([]);
   const [addRequest, setAddRequest] = useState<{ id: string; n: number }>({ id: "", n: 0 });
@@ -114,7 +117,7 @@ export default function App() {
     try {
       await api.deleteProject(project.id);
     } catch (e) {
-      window.alert(`Couldn't delete the project: ${e}`);
+      window.alert(`Couldn't delete the project: ${errorText(e)}`);
     }
     if (view.kind === "project" && view.id === project.id) setView({ kind: "import" });
     setOpened((ids) => ids.filter((id) => id !== project.id));
@@ -122,8 +125,9 @@ export default function App() {
   };
 
   const openGame = (p: ImportRecord) => {
-    setMode("files");
+    setMode("overview");
     setView({ kind: "project", id: p.id });
+    setModeRequest((r) => ({ id: p.id, mode: "overview", n: r.n + 1 }));
     setStatus(`${nameOf(p)} opened.`);
   };
 
@@ -154,12 +158,12 @@ export default function App() {
   /** "Loaded": in the open workspace; with none open, opened this session. */
   const loaded = (p: ImportRecord) => (editing ? editing.game === p.id || layerGames.includes(slug(p.name)) : opened.includes(p.id));
 
-  const modes: { id: Mode; label: string; Icon: typeof Box }[] = [
-    { id: "files", label: "Game files", Icon: FolderOpen },
-    { id: "overview", label: "Overview", Icon: Info },
-    { id: "editor", label: "Editor", Icon: Box },
-    { id: "live", label: "Live Preview", Icon: Radio },
-    { id: "play", label: "Game Projection", Icon: MonitorPlay },
+  const modes: { id: Mode; label: string; Icon: typeof Box; hint: string }[] = [
+    { id: "overview", label: "Overview", Icon: Info, hint: "What's in this game and what you can change" },
+    { id: "editor", label: "Edit", Icon: Box, hint: "Change levels, characters and things in a 2D/3D view" },
+    { id: "play", label: "Play", Icon: MonitorPlay, hint: "Play your edited copy in GameX (F5)" },
+    { id: "live", label: "Run original", Icon: Radio, hint: "Run the real game on an emulator or phone and watch its objects" },
+    { id: "files", label: "Files", Icon: FolderOpen, hint: "Advanced: the game's own files and code" },
   ];
   const activeMode: Mode | null = !current ? null : view.kind === "workspace" ? (mode === "play" ? "play" : "editor") : mode === "live" || mode === "overview" ? mode : "files";
   const showPanel = !(focus && view.kind === "project");
@@ -193,19 +197,17 @@ export default function App() {
         </nav>
         {current && (
           <div className="mode-tabs">
-            {modes.map(({ id, label, Icon }) => (
-              <button key={id} className={activeMode === id ? "active" : ""} onClick={() => switchMode(id)}>
+            {modes.map(({ id, label, Icon, hint }) => (
+              <button key={id} className={activeMode === id ? "active" : ""} onClick={() => switchMode(id)} title={hint}>
                 <Icon size={15} /> {label}
               </button>
             ))}
           </div>
         )}
         <span className="status-spacer" />
-        {current && (
-          <button className="icon-button" onClick={() => switchMode("play")} title="Play with the GameX engine">
-            <Play size={16} />
-          </button>
-        )}
+        <button className="icon-button" onClick={openHelp} title="Help and keys (F1)">
+          <HelpCircle size={16} />
+        </button>
         <button className={view.kind === "settings" ? "icon-button active" : "icon-button"} onClick={() => setView({ kind: "settings" })} title="Settings">
           <Settings size={16} />
         </button>
@@ -227,7 +229,7 @@ export default function App() {
               </button>
             </div>
             <ul className="game-cards">
-              {projects.length === 0 && !folded && <li className="muted small">Nothing imported yet.</li>}
+              {projects.length === 0 && !folded && <li className="muted small">No games yet. Import one to start.</li>}
               {projects.map((p) => {
                 const active = current?.id === p.id;
                 const isLoaded = loaded(p);
@@ -269,10 +271,12 @@ export default function App() {
           )}
           {view.kind === "import" && (
             <ImportScreen
+              firstRun={projects.length === 0}
               onImported={async (record) => {
                 await refresh();
-                setMode("files");
+                setMode("overview");
                 setView({ kind: "project", id: record.id });
+                setModeRequest((r) => ({ id: record.id, mode: "overview", n: r.n + 1 }));
                 setStatus(`${record.name} imported.`);
               }}
             />
@@ -292,6 +296,7 @@ export default function App() {
                   addRequest={addRequest}
                   playRequest={playRequest}
                   autoplay={autoplay}
+                  focusScene={editing.focus}
                   onAutoplayed={() => setAutoplay(false)}
                   onPlaying={(playing) => setMode(playing ? "play" : "editor")}
                   onPlayReal={() => {
@@ -299,13 +304,14 @@ export default function App() {
                     setMode("live");
                     setView({ kind: "project", id: editing.game });
                     setModeRequest((r) => ({ id: editing.game, mode: "live", n: r.n + 1 }));
-                    setStatus("This game's levels are built in its code: playing the real game in Live Preview.");
+                    setStatus("This game's levels are built in its code: playing the real game in Run original.");
                   }}
                   onSources={setLayerGames}
                   onStatus={setStatus}
                   onClose={() => {
-                    setMode("files");
+                    setMode("overview");
                     setView({ kind: "project", id: editing.game });
+                    setModeRequest((r) => ({ id: editing.game, mode: "overview", n: r.n + 1 }));
                   }}
                   onBuild={() => {
                     setMode("files");
@@ -334,8 +340,12 @@ export default function App() {
                     onTabChange={(t) => {
                       if (view.kind === "project" && view.id === p.id) setMode(t === "content" ? "files" : t);
                     }}
-                    onEditVisually={(path, report) => {
-                      setEditing({ game: p.id, path, report });
+                    onEditVisually={(path, report, scene) => {
+                      setEditing((prev) => {
+                        const n = (prev?.focus?.n ?? 0) + 1;
+                        const focus = scene ? { scene, n } : undefined;
+                        return prev && prev.path === path ? { ...prev, focus: focus ?? prev.focus } : { game: p.id, path, report, focus };
+                      });
                       setMode("editor");
                       setView({ kind: "workspace" });
                       setStatus(`${nameOf(p)} loaded successfully.`);
@@ -347,10 +357,12 @@ export default function App() {
         </main>
       </div>
 
+      <HelpPanel />
       <footer className="statusbar">
         <span className="status-dot" /> Ready
         <span className="sep">|</span>
         <span className="muted grow">{status}</span>
+        <UpdateNotice />
         <span className="muted">GameX {version ? `v${version}` : ""}</span>
       </footer>
     </div>

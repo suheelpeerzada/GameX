@@ -1,13 +1,15 @@
-import { Activity, Camera, Crosshair, Eye, EyeOff, Link2, Link2Off, Pin, Play, RefreshCw, Search } from "lucide-react";
+import { Activity, Crosshair, Eye, EyeOff, Link2, Link2Off, Pin, Play, RefreshCw, Search } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../lib/api";
 import { categories } from "../lib/categories";
-import { gx } from "../lib/gx";
 import { type LiveChange, markKept, recordLiveChange } from "../lib/livechanges";
 import { type Calibration, type CalibrationPoint, classGroups, nearest, solveCalibration, toScreen } from "../lib/picker";
 import type { Category, EditState, GameObject, KeptChange, LiveClassCount, LiveField, LiveInstance, LiveObject, LivePosition, UiNode } from "../lib/types";
 import { CategoryIcon } from "../lib/visuals";
 import GameScreen, { type PickMarker, type PickMode } from "./GameScreen";
+import { useRedraw } from "./Redraw";
+import { errorText } from "../lib/errors";
+import ErrorText from "./ErrorText";
 
 interface Calibrated {
   calibration: Calibration | null;
@@ -63,6 +65,8 @@ interface Props {
   onBuild: () => void;
   /** Whether the Live tab is on screen. */
   visible: boolean;
+  /** Opens a scene of the game's layer in the Editor (after Save to Editor). */
+  onOpenEditor?: (scene: string) => void;
 }
 
 /**
@@ -70,7 +74,7 @@ interface Props {
  * many objects of each are alive, the objects themselves, and their fields,
  * which can be changed while the game runs.
  */
-export default function LiveView({ projectId, objects, onOpenObject, onRun, onEdited, onBuild, visible }: Props) {
+export default function LiveView({ projectId, objects, onOpenObject, onRun, onEdited, onBuild, visible, onOpenEditor }: Props) {
   const [connected, setConnected] = useState<{ pid: number; package: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -102,8 +106,6 @@ export default function LiveView({ projectId, objects, onOpenObject, onRun, onEd
   const [calibrating, setCalibrating] = useState(false);
   const [uiHit, setUiHit] = useState<UiNode | null>(null);
   const [pickNote, setPickNote] = useState<string | null>(null);
-  const [capturing, setCapturing] = useState(false);
-  const [captured, setCaptured] = useState<string | null>(null);
   // Classes whose objects aren't drawn over the screen (chosen by the user).
   const [hidden, setHidden] = useState<Set<string>>(() => loadHidden(projectId));
   const [showClasses, setShowClasses] = useState(false);
@@ -126,37 +128,6 @@ export default function LiveView({ projectId, objects, onOpenObject, onRun, onEd
   );
   const classNames = useMemo(() => classes.map((c) => c.id.slice("class:".length)), [classes]);
 
-  /** The level on screen now, into the game's layer (made first if needed). */
-  const captureLevel = async () => {
-    setCapturing(true);
-    try {
-      const layer = (await gx.layerForImport(projectId)) ?? (await gx.makeLayer(projectId)).path;
-      // The game's screen right now, as the level's backdrop (when the mirror is showing it).
-      const canvas = document.querySelector<HTMLCanvasElement>(`canvas[data-game-screen="${CSS.escape(projectId)}"]`);
-      let screen: string | null = null;
-      try {
-        screen = canvas && canvas.width > 1 ? canvas.toDataURL("image/png") : null;
-      } catch {
-        screen = null;
-      }
-      const c = calibrated.calibration;
-      const result = await api.liveCaptureLevel(projectId, layer, liveClasses, screen, c ? [c.ax, c.bx, c.ay, c.by] : null);
-      const back =
-        result.backdrop === "aligned"
-          ? " with the game's screen behind them"
-          : result.backdrop === "assumed"
-            ? " with the game's screen behind them (not lined up yet: calibrate the picker on two objects, then capture again)"
-            : " (start the screen mirror to also get the level's picture)";
-      setCaptured(
-        `Captured ${result.objects} object${result.objects === 1 ? "" : "s"} (${result.matched} placed as things)${back} into the scene "${result.scene}". Open the Editor to see it.`,
-      );
-    } catch (e) {
-      fail(e);
-    } finally {
-      setCapturing(false);
-    }
-  };
-
   const fail = (e: unknown) => {
     const message = String(e);
     setError(message);
@@ -170,7 +141,7 @@ export default function LiveView({ projectId, objects, onOpenObject, onRun, onEd
       const info = await api.liveAttach(projectId);
       setConnected({ pid: info.pid, package: info.package });
     } catch (e) {
-      setError(String(e));
+      setError(errorText(e));
     } finally {
       setBusy(false);
     }
@@ -258,6 +229,22 @@ export default function LiveView({ projectId, objects, onOpenObject, onRun, onEd
         .filter((c) => (counts[c] ?? 0) > 0),
     [classes, counts],
   );
+  const redraw = useRedraw({
+    projectId,
+    visible,
+    connected: !!connected,
+    connect,
+    liveClasses,
+    classes,
+    selectedObject,
+    onSelect: (cls, obj) => {
+      setUiHit(null);
+      setSelectedClass(cls);
+      setSelectedObject(obj);
+    },
+    onError: fail,
+    onOpenEditor,
+  });
   useEffect(() => {
     if (!connected || !picking || !visible) return;
     const tick = async () => {
@@ -365,7 +352,7 @@ export default function LiveView({ projectId, objects, onOpenObject, onRun, onEd
             : "The game draws this area itself. Connect to the running game to find the objects in it.",
         );
     } catch (e) {
-      setPickNote(String(e));
+      setPickNote(errorText(e));
     }
   };
 
@@ -528,7 +515,7 @@ export default function LiveView({ projectId, objects, onOpenObject, onRun, onEd
       return true;
     } catch (e) {
       if (notify) setKept(null);
-      setError(`${field.name}: ${e}`);
+      setError(`${field.name}: ${errorText(e)}`);
       return false;
     }
   };
@@ -573,7 +560,7 @@ export default function LiveView({ projectId, objects, onOpenObject, onRun, onEd
       onEdited(await api.undoEdit(projectId), [kept.file]);
       setKept(null);
     } catch (e) {
-      setError(String(e));
+      setError(errorText(e));
     }
   };
 
@@ -585,7 +572,7 @@ export default function LiveView({ projectId, objects, onOpenObject, onRun, onEd
   if (!connected) {
     return (
       <div className="live-split">
-        <GameScreen projectId={projectId} visible={visible} pick={pick} />
+        <GameScreen projectId={projectId} visible={visible} pick={pick} boxes={redraw.boxes} pause={redraw.pause} onArrow={redraw.onArrow} />
       <div className="live-empty">
         {pickPanel}
         <Activity size={28} className="ai-mark" />
@@ -594,7 +581,7 @@ export default function LiveView({ projectId, objects, onOpenObject, onRun, onEd
           See the objects inside the running game (characters, enemies, items…) and change their values while you play.
           Works for Java/Kotlin games. Start the game with Run, then connect.
         </p>
-        {error && <div className="panel error small">{error}</div>}
+        {error && <div className="panel error small"><ErrorText text={error} /></div>}
         <div className="row">
           <button onClick={onRun}>
             <Play size={14} /> Run the game
@@ -610,7 +597,7 @@ export default function LiveView({ projectId, objects, onOpenObject, onRun, onEd
 
   return (
     <div className="live-split">
-      <GameScreen projectId={projectId} visible={visible} pick={pick} />
+      <GameScreen projectId={projectId} visible={visible} pick={pick} boxes={redraw.boxes} pause={redraw.pause} onArrow={redraw.onArrow} />
     <div className="live">
       <div className="live-bar">
         <span className="status-dot ok" />
@@ -623,9 +610,6 @@ export default function LiveView({ projectId, objects, onOpenObject, onRun, onEd
         <label className="small">
           <input type="checkbox" checked={autoRefresh} onChange={(e) => setAutoRefresh(e.target.checked)} /> Live refresh
         </label>
-        <button onClick={captureLevel} disabled={capturing || liveClasses.length === 0} title="Put every object where it is now into the game's visual layer, as a new scene">
-          <Camera size={14} /> {capturing ? "Capturing…" : "Capture level"}
-        </button>
         <button onClick={() => { refreshCounts(); refreshInstances(); refreshObject(); }} title="Refresh now">
           <RefreshCw size={14} />
         </button>
@@ -633,20 +617,13 @@ export default function LiveView({ projectId, objects, onOpenObject, onRun, onEd
           <Link2Off size={14} /> Disconnect
         </button>
       </div>
-      {captured && (
-        <div className="notice small">
-          {captured}{" "}
-          <button className="link" onClick={() => setCaptured(null)}>
-            Dismiss
-          </button>
-        </div>
-      )}
       {error && (
         <div className="panel error small live-error">
-          {error} <button className="link" onClick={() => setError(null)}>Dismiss</button>
+          <ErrorText text={error} /> <button className="link" onClick={() => setError(null)}>Dismiss</button>
         </div>
       )}
 
+      {redraw.panel}
       {pickPanel}
       <div className="live-changes small">
         <span>
@@ -813,7 +790,7 @@ export default function LiveView({ projectId, objects, onOpenObject, onRun, onEd
                           setError(null);
                           return true;
                         } catch (e) {
-                          setError(String(e));
+                          setError(errorText(e));
                           return false;
                         } finally {
                           changeSeq.current++;

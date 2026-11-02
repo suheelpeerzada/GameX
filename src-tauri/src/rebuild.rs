@@ -57,6 +57,9 @@ pub struct BuildOptions {
     pub icon_path: Option<String>,
     pub removed_permissions: Vec<String>,
     pub output_path: String,
+    /// Adds GameX's draw recorder (for redrawing levels from the running game).
+    #[serde(default)]
+    pub recorder: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -67,6 +70,9 @@ pub struct BuildResult {
     pub sha256: String,
     pub package: String,
     pub edited_files: usize,
+    /// What adding the draw recorder found, when it was added.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recorder: Option<crate::drawrec::Instrumented>,
 }
 
 // ---------------------------------------------------------------------------
@@ -504,7 +510,7 @@ pub fn validate(options: &BuildOptions) -> Result<(), String> {
 
 /// Builds `build/work`: apktool's output, the user's edits, and the build
 /// options applied. Returns the work folder and how many edits it holds.
-pub fn prepare(project_root: &Path, options: &BuildOptions) -> Result<(PathBuf, usize), String> {
+pub fn prepare(project_root: &Path, options: &BuildOptions) -> Result<(PathBuf, usize, Option<crate::drawrec::Instrumented>), String> {
     let io = |e: io::Error| e.to_string();
     let store = EditStore::new(project_root);
     let work = project_root.join("build").join("work");
@@ -513,6 +519,7 @@ pub fn prepare(project_root: &Path, options: &BuildOptions) -> Result<(PathBuf, 
     }
     crate::import::copy_dir(&project_root.join("unpacked").join("apktool"), &work).map_err(io)?;
     let edited = store.overlay("apktool/", &work).map_err(io)?;
+    let recorder = if options.recorder { Some(crate::drawrec::instrument(&work).map_err(io)?) } else { None };
 
     let icon = match &options.icon_path {
         Some(path) => {
@@ -546,13 +553,14 @@ pub fn prepare(project_root: &Path, options: &BuildOptions) -> Result<(PathBuf, 
             removed_permissions: &options.removed_permissions,
         },
     );
+    let manifest = if options.recorder { crate::drawrec::debuggable(&manifest) } else { manifest };
     fs::write(&manifest_path, manifest).map_err(io)?;
 
     let yml_path = work.join("apktool.yml");
     let yml = fs::read_to_string(&yml_path).map_err(io)?;
     let yml = edit_apktool_yml(&yml, options.version_code, options.version_name.trim());
     fs::write(&yml_path, yml).map_err(io)?;
-    Ok((work, edited))
+    Ok((work, edited, recorder))
 }
 
 struct SigningKey {
@@ -615,7 +623,7 @@ pub fn build(
     let java = tools::java_tool("java").ok_or("Java wasn't found.")?;
 
     progress("prepare", "Applying your edits and build settings");
-    let (work, edited_files) = prepare(project_root, options)?;
+    let (work, edited_files, recorder) = prepare(project_root, options)?;
     let build_dir = project_root.join("build");
     let unsigned = build_dir.join("unsigned.apk");
     let signed_dir = build_dir.join("signed");
@@ -677,6 +685,7 @@ pub fn build(
         sha256,
         package: options.package.clone(),
         edited_files,
+        recorder,
     })
 }
 
@@ -780,6 +789,7 @@ mod tests {
             icon_path: None,
             removed_permissions: vec![],
             output_path: dir.join("out.apk").display().to_string(),
+            recorder: false,
         }
     }
 
@@ -801,7 +811,7 @@ mod tests {
             package: "com.me.modded".into(),
             ..options(root)
         };
-        let (work, edited) = prepare(root, &opts).unwrap();
+        let (work, edited, _) = prepare(root, &opts).unwrap();
         assert_eq!(edited, 1);
         assert_eq!(fs::read_to_string(work.join("smali/a/Hero.smali")).unwrap(), "speed 5");
         assert!(work.join("res/drawable-nodpi/gamex_icon.png").is_file());

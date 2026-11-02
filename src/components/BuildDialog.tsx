@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import { api, formatBytes, pickFile, pickSaveApk } from "../lib/api";
 import ToolPrompt from "./ToolPrompt";
 import type { BuildInfo, BuildResult } from "../lib/types";
+import { errorText } from "../lib/errors";
+import ErrorText from "./ErrorText";
 
 interface Props {
   projectId: string;
@@ -16,6 +18,37 @@ type Stage =
   | { kind: "failed"; error: string };
 
 const PACKAGE = /^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$/;
+
+/** What a permission lets the game do, in words. */
+const PERMISSION_WORDS: Record<string, string> = {
+  INTERNET: "Go online",
+  ACCESS_NETWORK_STATE: "See if the phone is online",
+  ACCESS_WIFI_STATE: "See Wi-Fi status",
+  VIBRATE: "Vibrate",
+  WAKE_LOCK: "Keep the screen on",
+  WRITE_EXTERNAL_STORAGE: "Save files on the phone",
+  READ_EXTERNAL_STORAGE: "Read files on the phone",
+  READ_MEDIA_IMAGES: "See your photos",
+  READ_MEDIA_AUDIO: "See your music",
+  RECORD_AUDIO: "Use the microphone",
+  CAMERA: "Use the camera",
+  ACCESS_FINE_LOCATION: "Know exactly where you are",
+  ACCESS_COARSE_LOCATION: "Know roughly where you are",
+  POST_NOTIFICATIONS: "Show notifications",
+  RECEIVE_BOOT_COMPLETED: "Start when the phone starts",
+  FOREGROUND_SERVICE: "Keep running in the background",
+  BILLING: "In-app purchases",
+  AD_ID: "Use the advertising ID (ads)",
+  READ_PHONE_STATE: "Read phone details",
+  GET_ACCOUNTS: "See your accounts",
+  BLUETOOTH: "Use Bluetooth",
+  BLUETOOTH_CONNECT: "Connect to Bluetooth devices",
+};
+
+function permissionWords(p: string): string {
+  const name = p.split(".").pop() ?? p;
+  return PERMISSION_WORDS[name] ?? name.replace(/_/g, " ").toLowerCase().replace(/^./, (c) => c.toUpperCase());
+}
 
 /** Asks for the app's name, icon, package, version and permissions, then builds and saves the APK. */
 export default function BuildDialog({ projectId, editedCount, onClose }: Props) {
@@ -40,11 +73,12 @@ export default function BuildDialog({ projectId, editedCount, onClose }: Props) 
       .then((i) => {
         setInfo(i);
         setAppName(i.appName);
-        setPkg(i.package);
+        // Next to the original by default: a rebuilt game can't install over it anyway.
+        setPkg(`${i.package}.mod`);
         setVersionName(i.versionName);
         setVersionCode(String(i.versionCode));
       })
-      .catch((e) => setLoadError(String(e)));
+      .catch((e) => setLoadError(errorText(e)));
   }, [projectId, reload]);
 
   const building = stage.kind === "building";
@@ -69,7 +103,7 @@ export default function BuildDialog({ projectId, editedCount, onClose }: Props) 
       setIconPreview(await api.readPng(path));
       setIconPath(path);
     } catch (e) {
-      window.alert(String(e));
+      window.alert(errorText(e));
     }
   };
 
@@ -95,7 +129,7 @@ export default function BuildDialog({ projectId, editedCount, onClose }: Props) 
       });
       setStage({ kind: "done", result });
     } catch (e) {
-      setStage({ kind: "failed", error: String(e) });
+      setStage({ kind: "failed", error: errorText(e) });
     } finally {
       unlisten();
     }
@@ -104,9 +138,9 @@ export default function BuildDialog({ projectId, editedCount, onClose }: Props) 
   return (
     <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && !building && onClose()}>
       <div className="modal" role="dialog" aria-modal="true" aria-labelledby="build-title">
-        <h2 id="build-title">Build APK</h2>
+        <h2 id="build-title">Make a new APK</h2>
 
-        {loadError && <div className="panel error">{loadError}</div>}
+        {loadError && <div className="panel error"><ErrorText text={loadError} /></div>}
         {!info && !loadError && <p className="muted">Reading the game's settings…</p>}
 
         {info && stage.kind === "form" && (
@@ -171,44 +205,25 @@ export default function BuildDialog({ projectId, editedCount, onClose }: Props) 
                 <span className="muted small">Shown under the icon on the phone.</span>
               </label>
 
-              <label className="field">
-                <span className="label">Package name</span>
-                <input type="text" className="mono" value={pkg} onChange={(e) => setPkg(e.target.value)} />
-                <span className="muted small">
-                  {pkg === info.package ? (
-                    <>
-                      Same as the original. Android won't install this over the original game because it's signed
-                      with a different key, so uninstall the original first.{" "}
-                      <button className="link" onClick={() => setPkg(`${info.package}.mod`)}>
-                        Use {info.package}.mod instead
-                      </button>
-                    </>
-                  ) : (
-                    <>Different from the original ({info.package}), so both can be installed side by side.</>
-                  )}
+              <label className="field switch-field">
+                <input type="checkbox" checked={pkg !== info.package} onChange={(e) => setPkg(e.target.checked ? `${info.package}.mod` : info.package)} />
+                <span>
+                  <span className="label">Install next to the original game</span>
+                  <span className="muted small">
+                    {pkg !== info.package
+                      ? "Both games can be on the phone at once."
+                      : "Replaces the original: uninstall the original game first (its signature can't be reused)."}
+                  </span>
                 </span>
               </label>
 
-              <div className="field-pair">
-                <label className="field">
-                  <span className="label">Version name</span>
-                  <input type="text" value={versionName} onChange={(e) => setVersionName(e.target.value)} />
-                  <span className="muted small">Shown to people, e.g. 1.0-mod. Original: {info.versionName || "none"}</span>
-                </label>
-                <label className="field">
-                  <span className="label">Version code</span>
-                  <input type="number" min={1} value={versionCode} onChange={(e) => setVersionCode(e.target.value)} />
-                  <span className="muted small">A whole number; higher counts as newer. Original: {info.versionCode}</span>
-                </label>
-              </div>
-
               <div className="field">
-                <span className="label">Permissions (from the manifest)</span>
+                <span className="label">What the game may do</span>
                 {info.permissions.length === 0 ? (
                   <span className="muted small">This game asks for no permissions.</span>
                 ) : (
                   <>
-                    <span className="muted small">Untick a permission to remove it. Removing INTERNET keeps the game fully offline.</span>
+                    <span className="muted small">Untick anything you don't want it to do. Without "Go online" the game stays fully offline.</span>
                     <ul className="permissions">
                       {info.permissions.map((p) => (
                         <li key={p}>
@@ -225,18 +240,35 @@ export default function BuildDialog({ projectId, editedCount, onClose }: Props) 
                                 })
                               }
                             />
-                            <span className="mono">{p.replace(/^android\.permission\./, "")}</span>
+                            <span>{permissionWords(p)}</span>
                           </label>
                         </li>
                       ))}
                     </ul>
                   </>
                 )}
-                <span className="muted small">
-                  To change anything else in the manifest, edit AndroidManifest.xml under Core.
-                </span>
               </div>
 
+              <details className="advanced">
+                <summary>Advanced</summary>
+                <label className="field">
+                  <span className="label">Package name</span>
+                  <input type="text" className="mono" value={pkg} onChange={(e) => setPkg(e.target.value)} />
+                  <span className="muted small">The game's ID on the phone. Original: {info.package}</span>
+                </label>
+                <div className="field-pair">
+                  <label className="field">
+                    <span className="label">Version name</span>
+                    <input type="text" value={versionName} onChange={(e) => setVersionName(e.target.value)} />
+                    <span className="muted small">Shown to people, e.g. 1.0-mod. Original: {info.versionName || "none"}</span>
+                  </label>
+                  <label className="field">
+                    <span className="label">Version code</span>
+                    <input type="number" min={1} value={versionCode} onChange={(e) => setVersionCode(e.target.value)} />
+                    <span className="muted small">A whole number; higher counts as newer. Original: {info.versionCode}</span>
+                  </label>
+                </div>
+                <span className="muted small">To change anything else in the manifest, edit AndroidManifest.xml under Files.</span>
               <div className="field">
                 <span className="label">Signing</span>
                 <span className="small">
@@ -251,6 +283,7 @@ export default function BuildDialog({ projectId, editedCount, onClose }: Props) 
                   same key.
                 </span>
               </div>
+              </details>
             </div>
 
             {problems.length > 0 && <div className="muted small form-problems">{problems.join(" ")}</div>}
@@ -291,16 +324,23 @@ export default function BuildDialog({ projectId, editedCount, onClose }: Props) 
               <dd className="mono">{stage.result.path}</dd>
               <dt>Size</dt>
               <dd>{formatBytes(stage.result.size)}</dd>
-              <dt>Package</dt>
-              <dd className="mono">{stage.result.package}</dd>
-              <dt>SHA-256</dt>
-              <dd className="mono">{stage.result.sha256}</dd>
             </dl>
             <p className="muted small">
-              To install it, copy the file to your phone and open it (allow installs from this source if asked), or
-              run <code>adb install "{stage.result.path}"</code>.
-              {stage.result.package === info?.package && " Uninstall the original game first: it has the same package name."}
+              To install it, copy the file to your phone and open it (allow installs from this source if asked), or use Run original to
+              try it on an emulator.
+              {stage.result.package === info?.package && " Uninstall the original game first: this copy replaces it."}
             </p>
+            <details className="advanced">
+              <summary>Advanced</summary>
+              <dl className="details">
+                <dt>Package</dt>
+                <dd className="mono">{stage.result.package}</dd>
+                <dt>SHA-256</dt>
+                <dd className="mono">{stage.result.sha256}</dd>
+                <dt>Install with adb</dt>
+                <dd className="mono">adb install "{stage.result.path}"</dd>
+              </dl>
+            </details>
             <div className="modal-actions">
               <button className="primary" onClick={onClose}>
                 Done
@@ -313,7 +353,7 @@ export default function BuildDialog({ projectId, editedCount, onClose }: Props) 
           <>
             <div className="panel error">
               <h2>The build failed</h2>
-              <pre className="code">{stage.error}</pre>
+              <p><ErrorText text={stage.error} /></p>
             </div>
             <p className="muted small">
               Your edits are safe. If you changed smali or XML, the message above usually names the file and line.

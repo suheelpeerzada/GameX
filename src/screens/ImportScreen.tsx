@@ -1,31 +1,50 @@
+import { HelpCircle, Upload, Wrench } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { openHelp } from "../components/HelpPanel";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import ImportLoader from "../components/ImportLoader";
 import ToolPrompt from "../components/ToolPrompt";
 import { api, inDesktopApp, pickPath, type PickKind } from "../lib/api";
 import type { ImportProgress, ImportRecord } from "../lib/types";
+import { errorText } from "../lib/errors";
+import ErrorText from "../components/ErrorText";
 
 const SOURCES: { kind: PickKind; title: string; detail: string }[] = [
   {
     kind: "apk",
-    title: "Android APK",
-    detail: "Unpacked with apktool and jadx when installed. The APK itself is never changed.",
+    title: "Android game (.apk)",
+    detail: "The file you'd install on a phone. GameX opens a copy; your file is never changed.",
   },
   {
     kind: "zip",
-    title: "ZIP archive",
-    detail: "A ZIP of game files or of an already decompiled project.",
+    title: "Game in a .zip",
+    detail: "A .zip file with a game's files inside.",
   },
   {
     kind: "folder",
-    title: "Folder",
-    detail: "A game folder on disk. GameX works on a copy, never the folder itself.",
+    title: "Game folder",
+    detail: "A folder with a game's files. GameX works on a copy, never the folder itself.",
   },
 ];
 
-type Props = { onImported: (record: ImportRecord) => void };
+/** What Android games need, installed with one button from the welcome. */
+const ANDROID_TOOLS = ["java", "apktool", "jadx", "uber-apk-signer"];
 
-export default function ImportScreen({ onImported }: Props) {
+type Props = {
+  /** No games yet: welcome first. */
+  firstRun?: boolean;
+  onImported: (record: ImportRecord) => void;
+};
+
+export default function ImportScreen({ firstRun = false, onImported }: Props) {
+  // "Get tools for Android games": the ones still missing, while asking.
+  const [getting, setGetting] = useState<string[] | null>(null);
+  const [toolsReady, setToolsReady] = useState(false);
+  const getTools = async () => {
+    const missing = await api.toolsMissing(ANDROID_TOOLS).catch(() => ANDROID_TOOLS);
+    if (missing.length) setGetting(missing);
+    else setToolsReady(true);
+  };
   // What's being imported (its name) and the step it's on.
   const [busy, setBusy] = useState<string | null>(null);
   const [current, setCurrent] = useState<ImportProgress | null>(null);
@@ -52,7 +71,7 @@ export default function ImportScreen({ onImported }: Props) {
     try {
       onImported(await api.importGame(path));
     } catch (e) {
-      setError(String(e));
+      setError(errorText(e));
     } finally {
       unlisten();
       busyRef.current = false;
@@ -99,11 +118,45 @@ export default function ImportScreen({ onImported }: Props) {
           onCancel={() => setNeeds(null)}
         />
       )}
-      <h1>Import a game</h1>
-      <p className="muted">
-        Pick how the game is packaged, or drop it onto this window. GameX keeps the original
-        untouched and unpacks a working copy.
-      </p>
+      {getting && (
+        <ToolPrompt
+          missing={getting}
+          action="Opening Android games"
+          onReady={() => {
+            setGetting(null);
+            setToolsReady(true);
+          }}
+          onCancel={() => setGetting(null)}
+        />
+      )}
+      {firstRun && (
+        <section className="welcome">
+          <h1>Welcome to GameX</h1>
+          <p className="muted">
+            Change the games you already have: how their characters look, their sounds, their levels and how hard they are. Then play your
+            version, or make a new copy to install.
+          </p>
+          <div className="task-cards">
+            <button className="task-card" disabled={busy !== null || !inDesktopApp} onClick={() => choose("apk")}>
+              <Upload size={20} />
+              <span className="task-title">Import a game</span>
+              <span className="muted small">Pick a game's file, or drop it onto this window.</span>
+            </button>
+            <button className="task-card" disabled={!inDesktopApp || toolsReady} onClick={getTools}>
+              <Wrench size={20} />
+              <span className="task-title">{toolsReady ? "Android tools are ready" : "Get tools for Android games"}</span>
+              <span className="muted small">One button installs what opening and rebuilding Android games needs (Java included).</span>
+            </button>
+            <button className="task-card" onClick={openHelp}>
+              <HelpCircle size={20} />
+              <span className="task-title">Learn the basics</span>
+              <span className="muted small">Short how-tos and the keys, any time with F1.</span>
+            </button>
+          </div>
+        </section>
+      )}
+      <h1>{firstRun ? "Import a game" : "Import another game"}</h1>
+      <p className="muted">Pick what kind of file the game is, or drop it onto this window. GameX works on a copy, so your file is never changed.</p>
 
       <div className={dragging ? "sources dragging" : "sources"}>
         {SOURCES.map((s) => (
@@ -124,7 +177,7 @@ export default function ImportScreen({ onImported }: Props) {
       {error && (
         <section className="panel error">
           <h2>Import failed</h2>
-          <p>{error}</p>
+          <p><ErrorText text={error} /></p>
         </section>
       )}
     </div>

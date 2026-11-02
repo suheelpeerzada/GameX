@@ -2,6 +2,8 @@ import { Download, Music, Search } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api, formatBytes, pickSaveFile } from "../lib/api";
 import type { MediaItem } from "../lib/types";
+import { errorText } from "../lib/errors";
+import ErrorText from "./ErrorText";
 
 const PAGE = 24;
 
@@ -21,7 +23,7 @@ export default function EmbeddedMedia({ projectId, path, auto }: { projectId: st
     try {
       setItems(await api.scanMedia(projectId, path));
     } catch (e) {
-      setError(String(e));
+      setError(errorText(e));
     } finally {
       setBusy(false);
     }
@@ -43,7 +45,7 @@ export default function EmbeddedMedia({ projectId, path, auto }: { projectId: st
     try {
       await api.saveMediaItem(projectId, path, item.offset, item.len, dest);
     } catch (e) {
-      setError(String(e));
+      setError(errorText(e));
     }
   };
 
@@ -62,7 +64,7 @@ export default function EmbeddedMedia({ projectId, path, auto }: { projectId: st
         Images and sounds found inside this file by their content (PNG, JPEG, GIF, BMP, WebP, WAV, OGG, MP3), whatever
         the engine.
       </p>
-      {error && <div className="panel error small">{error}</div>}
+      {error && <div className="panel error small"><ErrorText text={error} /></div>}
       {items && items.length === 0 && <p className="muted small">Nothing found in this file.</p>}
       {items && items.length > 0 && (
         <>

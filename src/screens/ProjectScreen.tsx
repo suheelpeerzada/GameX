@@ -18,14 +18,15 @@ import {
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import CategoryTree from "../components/CategoryTree";
 import Inspector from "../components/Inspector";
-import { api, formatBytes, pickPath } from "../lib/api";
-import { statusLabel } from "../lib/categories";
+import { api, pickPath } from "../lib/api";
+import { useShowCode } from "../lib/advanced";
 import { projectFeatures } from "../lib/features";
 import { gx, type TranslationReport } from "../lib/gx";
 import ImportLoader from "../components/ImportLoader";
 
 // Loaded only when a project uses them (see lib/features.ts).
 const AiPanel = lazy(() => import("../components/AiPanel"));
+const GameOverview = lazy(() => import("../components/GameOverview"));
 const BuildDialog = lazy(() => import("../components/BuildDialog"));
 const RunDialog = lazy(() => import("../components/RunDialog"));
 const ToolPrompt = lazy(() => import("../components/ToolPrompt"));
@@ -33,6 +34,8 @@ const LiveView = lazy(() => import("../components/LiveView"));
 import { currentTheme, setTheme, type Theme } from "../lib/theme";
 import type { AiStatus, Category, EditState, GameObject, GameProject, ImportRecord, ModelInfo } from "../lib/types";
 import { ObjectIcon, containerLongLabel } from "../lib/visuals";
+import { errorText } from "../lib/errors";
+import ErrorText from "../components/ErrorText";
 
 type Tab = "content" | "live" | "overview";
 
@@ -45,7 +48,7 @@ interface Props {
   onToggleFocus: () => void;
   onOpenSettings: () => void;
   /** Opens the visual editor on this game's layer. */
-  onEditVisually: (path: string, report?: TranslationReport) => void;
+  onEditVisually: (path: string, report?: TranslationReport, scene?: string) => void;
   /** Bumped to open the Build dialog (the visual editor's "Export modified APK"). */
   buildRequest?: number;
   /** The game's name as the phone shows it (launcher label), if it has one. */
@@ -77,7 +80,8 @@ export default function ProjectScreen({ project, active: shown, focus, onToggleF
   const features = projectFeatures(project.container, analysis);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [tab, setTabState] = useState<Tab>("content");
+  const [tab, setTabState] = useState<Tab>("overview");
+  const [showCode, setShowCode] = useShowCode();
   const tabChanged = useRef(onTabChange);
   tabChanged.current = onTabChange;
   const setTab = (t: Tab) => {
@@ -118,7 +122,7 @@ export default function ProjectScreen({ project, active: shown, focus, onToggleF
         onEdited(state);
         setBuilding(true);
       })
-      .catch((e) => setError(String(e)));
+      .catch((e) => setError(errorText(e)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [buildRequest]);
 
@@ -135,7 +139,7 @@ export default function ProjectScreen({ project, active: shown, focus, onToggleF
       try {
         setAnalysis(await api.getAnalysis(project.id, refresh));
       } catch (e) {
-        setError(String(e));
+        setError(errorText(e));
       } finally {
         setBusy(false);
       }
@@ -175,7 +179,7 @@ export default function ProjectScreen({ project, active: shown, focus, onToggleF
     try {
       setAiStatus(await api.aiSetModel(model));
     } catch (e) {
-      setError(String(e));
+      setError(errorText(e));
     }
   };
 
@@ -183,16 +187,27 @@ export default function ProjectScreen({ project, active: shown, focus, onToggleF
     try {
       onEdited(await api.undoEdit(project.id));
     } catch (e) {
-      setError(`Couldn't undo: ${e}`);
+      setError(`Couldn't undo: ${errorText(e)}`);
     }
   };
 
   // Every game is edited visually on its layer: made the first time, then reopened.
-  const editVisually = async () => {
+  const editVisually = async (scene?: string) => {
     setError(null);
     try {
       const existing = await gx.layerForImport(project.id);
-      if (existing) return onEditVisually(existing);
+      if (existing && existing.outdated) {
+        const again = window.confirm(
+          "GameX now reads this game better (where things are, solid floors and walls, animations).\n\n" +
+            "Read the game again? This makes a fresh editable copy; the current one stays in its folder with your edits.",
+        );
+        if (!again) {
+          await gx.keepLayer(project.id);
+          return onEditVisually(existing.path, undefined, scene);
+        }
+      } else if (existing) {
+        return onEditVisually(existing.path, undefined, scene);
+      }
       setLayering(true);
       const made = await gx.makeLayer(project.id);
       onEditVisually(made.path, made.report);
@@ -212,7 +227,7 @@ export default function ProjectScreen({ project, active: shown, focus, onToggleF
     if (modeRequest.mode === "editor") return void editVisually();
     if (modeRequest.mode === "live" && !features.live) {
       setTab("content");
-      return setError("Live Preview needs the game running on an emulator or phone with debugging, which this game's import doesn't allow.");
+      return setError("Run original needs the game running on an emulator or phone with debugging, which this game's import doesn't allow.");
     }
     setTab(modeRequest.mode);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -226,7 +241,7 @@ export default function ProjectScreen({ project, active: shown, focus, onToggleF
       const edited = await api.exportFiles(project.id, dest);
       window.alert(`Exported to ${dest} with ${edited} edited file${edited === 1 ? "" : "s"}.`);
     } catch (e) {
-      setError(String(e));
+      setError(errorText(e));
     }
   };
 
@@ -258,7 +273,7 @@ export default function ProjectScreen({ project, active: shown, focus, onToggleF
       await api.setCategory(project.id, objectId, category);
     } catch (e) {
       if (before) apply(before.category === before.autoCategory ? null : before.category);
-      setError(`Couldn't save the change: ${e}`);
+      setError(`Couldn't save the change: ${errorText(e)}`);
     }
   };
 
@@ -383,7 +398,7 @@ export default function ProjectScreen({ project, active: shown, focus, onToggleF
         </div>
       </header>
 
-      {error && <div className="panel error project-error">{error}</div>}
+      {error && <div className="panel error project-error"><ErrorText text={error} /></div>}
       {needTool && (
         <Suspense fallback={null}>
           <ToolPrompt
@@ -426,8 +441,11 @@ export default function ProjectScreen({ project, active: shown, focus, onToggleF
         // Kept mounted under Overview too, so open tabs keep their state.
         <div className="browser" hidden={tab !== "content"}>
           <aside className="tree-pane" hidden={focus}>
+            <label className="show-code small" title="Code and setup files (smali, Java, XML): for people who know them">
+              <input type="checkbox" checked={showCode} onChange={(e) => setShowCode(e.target.checked)} /> Show code (advanced)
+            </label>
             <CategoryTree
-              objects={analysis.objects}
+              objects={showCode ? analysis.objects : analysis.objects.filter((o) => o.category !== "code")}
               edited={edited}
               selectedId={activeId}
               onSelect={openObject}
@@ -609,6 +627,7 @@ export default function ProjectScreen({ project, active: shown, focus, onToggleF
             onEdited={onEdited}
             onBuild={() => setBuilding(true)}
             visible={shown && tab === "live"}
+            onOpenEditor={(scene) => editVisually(scene)}
             onRun={() => {
               setRunMounted(true);
               setRunOpen(true);
@@ -619,86 +638,20 @@ export default function ProjectScreen({ project, active: shown, focus, onToggleF
       )}
 
       {tab === "overview" && (
-        <div className="screen">
-          {analysis && (
-            <>
-              <section className="panel">
-                <h2>Engine</h2>
-                <p>
-                  <strong>{analysis.engine.name}</strong>{" "}
-                  <span className="muted small">
-                    {analysis.engine.confidence >= 0.9
-                      ? "detected with high confidence"
-                      : analysis.engine.confidence >= 0.5
-                        ? "detected with medium confidence"
-                        : "no engine recognized"}
-                  </span>
-                </p>
-                <ul className="evidence">
-                  {analysis.engine.evidence.map((e) => (
-                    <li key={e}>{e}</li>
-                  ))}
-                  {analysis.notes.map((n) => (
-                    <li key={n} className="muted">
-                      {n}
-                    </li>
-                  ))}
-                </ul>
-              </section>
-
-              <section className="panel">
-                <h2>What GameX can do with this game</h2>
-                <ul className="capabilities">
-                  {analysis.capabilities.map((c) => (
-                    <li key={c.feature}>
-                      <span className={`status ${c.status}`}>{statusLabel[c.status]}</span>
-                      <div>
-                        <div>{c.label}</div>
-                        <div className="muted small">{c.note}</div>
-                      </div>
-                    </li>
-                  ))}
-                </ul>
-              </section>
-            </>
-          )}
-
-          <section className="panel">
-            <h2>Unpacking</h2>
-            <ul className="steps">
-              {project.steps.map((step) => (
-                <li key={step.id} className={`step ${step.status}`}>
-                  <span className="step-status">{step.status}</span>
-                  <div>
-                    <div>{step.label}</div>
-                    {step.output && <div className="muted small mono">{step.output}</div>}
-                    {step.note && <div className="muted small">{step.note}</div>}
-                  </div>
-                </li>
-              ))}
-            </ul>
-          </section>
-
-          <section className="panel">
-            <h2>Details</h2>
-            <dl className="details">
-              <dt>Source</dt>
-              <dd className="mono">{project.sourcePath}</dd>
-              <dt>Original size</dt>
-              <dd>{formatBytes(project.originalBytes)}</dd>
-              {project.originalSha256 && (
-                <>
-                  <dt>SHA-256</dt>
-                  <dd className="mono">{project.originalSha256}</dd>
-                </>
-              )}
-              <dt>Unpacked files</dt>
-              <dd>{project.unpackedFiles.toLocaleString()}</dd>
-              <dt>Workspace</dt>
-              <dd className="mono">{project.workspacePath}</dd>
-            </dl>
-          </section>
-        </div>
+        <Suspense fallback={null}>
+          <GameOverview
+            project={project}
+            name={label ?? project.name}
+            icon={icon}
+            analysis={analysis}
+            features={features}
+            onOpen={openObject}
+            onEdit={() => editVisually()}
+            onBuild={() => setBuilding(true)}
+            onExport={exportFolder}
+            onEdited={() => api.getEditState(project.id).then((state) => onEdited(state)).catch(() => {})}
+          />
+        </Suspense>
       )}
     </div>
   );

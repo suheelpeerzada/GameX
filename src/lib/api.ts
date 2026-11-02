@@ -20,6 +20,8 @@ import type {
   UiNode,
   BuildOptions,
   BuildResult,
+  RecSaved,
+  RecView,
   Category,
   EditState,
   Explanation,
@@ -34,7 +36,6 @@ import type {
   ImportRecord,
   Preview,
   Settings,
-  ToolStatus,
 } from "./types";
 
 /** False when the UI is opened in a plain browser (e.g. `npm run dev`). */
@@ -43,7 +44,6 @@ export const inDesktopApp = isTauri();
 export const api = {
   importGame: (path: string) => invoke<ImportRecord>("import_game", { path }),
   listProjects: () => invoke<ImportRecord[]>("list_projects"),
-  getProject: (id: string) => invoke<ImportRecord>("get_project", { id }),
   deleteProject: (id: string) => invoke<void>("delete_project", { id }),
   getAnalysis: (id: string, refresh = false) =>
     invoke<GameProject>("get_analysis", { id, refresh }),
@@ -57,6 +57,11 @@ export const api = {
   getEditState: (id: string) => invoke<EditState>("get_edit_state", { id }),
   saveTextFile: (id: string, path: string, text: string) =>
     invoke<EditState>("save_text_file", { id, path, text }),
+  /** Gameplay fields' starting values in the game's code now, each [smali file, field]; null where not found. */
+  gameplayNow: (id: string, items: [string, string][]) => invoke<(string | null)[]>("gameplay_now", { id, items }),
+  /** Changes a gameplay field's starting value in the game's code (one undo step). */
+  setGameplayValue: (id: string, path: string, field: string, value: string) =>
+    invoke<EditState>("set_gameplay_value", { id, path, field, value }),
   replaceFile: (id: string, path: string, source: string) =>
     invoke<EditState>("replace_file", { id, path, source }),
   /** A game file's bytes (the edited version if any), for the 3D viewer. */
@@ -108,7 +113,6 @@ export const api = {
     listen<ImportProgress>("build-progress", (e) => handler(e.payload)),
   getSettings: () => invoke<Settings>("get_settings"),
   saveSettings: (settings: Settings) => invoke<void>("save_settings", { settings }),
-  toolStatus: () => invoke<ToolStatus[]>("tool_status"),
   toolsCatalog: () => invoke<ToolInfo[]>("tools_catalog"),
   runTargets: () => invoke<RunTarget[]>("run_targets"),
   runEnableAdb: (index: number) => invoke<void>("run_enable_adb", { index }),
@@ -140,9 +144,29 @@ export const api = {
       value,
     }),
   livePositions: (id: string, classes: string[]) => invoke<LivePosition[]>("live_positions", { id, classes }),
+  /** Builds a recording copy of the game (edits + GameX's draw recorder) as the project's last build. */
+  recBuild: (id: string) => invoke<BuildResult>("rec_build", { id }),
+  /** What the recorder sees now: every sprite's box, the player, the level explored so far. */
+  recTick: (id: string, classes: string[], explore: boolean, restart = false) =>
+    invoke<RecView>("rec_tick", { id, classes, explore, restart }),
+  /** Stops time in the game, or starts it again. */
+  recPause: (id: string, paused: boolean) => invoke<boolean>("rec_pause", { id, paused }),
+  /** Moves one of the game's objects by (dx, dy) screen pixels. */
+  recMove: (id: string, object: string, dx: number, dy: number) => invoke<void>("rec_move", { id, object, dx, dy }),
+  /** Saves the explored level in the game's layer as a new scene. */
+  recSave: (id: string, layer: string, kinds: Record<string, string>) => invoke<RecSaved>("rec_save", { id, layer, kinds }),
   /** Puts where the running game's objects are into its layer as a new scene. */
   liveCaptureLevel: (id: string, layer: string, classes: string[], screen?: string | null, calibration?: [number, number, number, number] | null) =>
-    invoke<{ scene: string; objects: number; matched: number; backdrop: "aligned" | "assumed" | "none" }>("live_capture_level", {
+    invoke<{
+      scene: string;
+      name: string;
+      objects: number;
+      skipped: number;
+      matched: number;
+      backdrop: "aligned" | "auto" | "assumed" | "none";
+      /** [ax, bx, ay, by] found from the sprites on screen, when it was. */
+      calibration: [number, number, number, number] | null;
+    }>("live_capture_level", {
       id,
       layer,
       classes,

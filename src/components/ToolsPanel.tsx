@@ -3,6 +3,8 @@ import { CheckCircle2, ChevronDown, ChevronUp, Download, ExternalLink, RefreshCw
 import { useCallback, useEffect, useState } from "react";
 import { api, formatBytes, inDesktopApp, pickPath } from "../lib/api";
 import type { Settings, ToolInfo, ToolProgress } from "../lib/types";
+import { errorText } from "../lib/errors";
+import ErrorText from "./ErrorText";
 
 /** Tools whose path can be set by hand, and the setting that holds it. */
 const PATH_KEYS: Record<string, keyof Settings> = {
@@ -38,6 +40,24 @@ export function ProgressBar({ progress }: { progress: ToolProgress | undefined }
 }
 
 /** Settings → Tools: optional tools to install, update or remove. */
+/** Tools by what they're for; the recommended ones are what most people need. */
+const TOOL_GROUPS: { title: string; why: string; ids: string[]; recommended: string[] }[] = [
+  {
+    title: "For Android games",
+    why: "Open .apk files fully (pictures, sounds and code) and make new APKs.",
+    ids: ["java", "apktool", "jadx", "uber-apk-signer"],
+    recommended: ["java", "apktool", "jadx", "uber-apk-signer"],
+  },
+  { title: "For Godot games", why: "Get a Godot game's levels and scripts out of its packed data.", ids: ["gdre"], recommended: ["gdre"] },
+  { title: "For Unity games", why: "Get more of a Unity game's pictures, sounds and models out.", ids: ["assetstudio"], recommended: ["assetstudio"] },
+  {
+    title: "To run the original",
+    why: "Run the real game on your PC. You need one emulator (LDPlayer works best with GameX) and Android's connection tools.",
+    ids: ["platform-tools", "ldplayer", "bluestacks", "android-emulator"],
+    recommended: ["platform-tools", "ldplayer"],
+  },
+];
+
 export default function ToolsPanel({ onChanged }: { onChanged?: () => void }) {
   const [tools, setTools] = useState<ToolInfo[]>([]);
   const [busy, setBusy] = useState<Record<string, boolean>>({});
@@ -70,7 +90,7 @@ export default function ToolsPanel({ onChanged }: { onChanged?: () => void }) {
       setDrafts(({ [id]: _, ...rest }) => rest);
       setErrors((x) => ({ ...x, [id]: "" }));
     } catch (e) {
-      setErrors((x) => ({ ...x, [id]: String(e) }));
+      setErrors((x) => ({ ...x, [id]: errorText(e) }));
     }
     refresh();
     onChanged?.();
@@ -87,7 +107,7 @@ export default function ToolsPanel({ onChanged }: { onChanged?: () => void }) {
     try {
       await action();
     } catch (e) {
-      setErrors((x) => ({ ...x, [tool.id]: String(e) }));
+      setErrors((x) => ({ ...x, [tool.id]: errorText(e) }));
     } finally {
       setBusy((b) => ({ ...b, [tool.id]: false }));
       setProgress((p) => {
@@ -106,15 +126,39 @@ export default function ToolsPanel({ onChanged }: { onChanged?: () => void }) {
     act(tool, () => api.toolUninstall(tool.id));
   };
 
+  /** Installs, one after another, what a group recommends and isn't there yet. */
+  const installRecommended = async (ids: string[]) => {
+    for (const tool of tools.filter((t) => ids.includes(t.id) && t.managed && !t.installed)) await install(tool);
+  };
+
   return (
     <section className="panel">
       <h2>Tools</h2>
       <p className="muted small">
-        Optional programs GameX can use. Install only what you need; GameX asks when something you do needs one that's
-        missing. Expand a tool for details and a custom path.
+        Programs GameX uses for some games. Install only what you need: GameX also asks when something you do needs one. Expand a tool
+        (Advanced) for its version and a custom path.
       </p>
+      {TOOL_GROUPS.map((group) => {
+        const list = tools.filter((t) => group.ids.includes(t.id));
+        if (!list.length) return null;
+        const missing = list.filter((t) => group.recommended.includes(t.id) && t.managed && !t.installed);
+        return (
+          <div key={group.title} className="tool-group">
+            <div className="tool-group-head">
+              <h3>{group.title}</h3>
+              {missing.length > 0 ? (
+                <button className="primary small" disabled={!inDesktopApp || missing.some((t) => busy[t.id])} onClick={() => installRecommended(group.recommended)}>
+                  <Download size={14} /> Install recommended
+                </button>
+              ) : (
+                <span className="pill ok">
+                  <CheckCircle2 size={11} /> Ready
+                </span>
+              )}
+            </div>
+            <p className="muted small">{group.why}</p>
       <ul className="tool-list">
-        {tools.map((tool) => {
+        {list.map((tool) => {
           const open = expanded.has(tool.id);
           const pathKey = PATH_KEYS[tool.id];
           return (
@@ -127,16 +171,15 @@ export default function ToolsPanel({ onChanged }: { onChanged?: () => void }) {
                 onClick={() => toggle(tool.id)}
                 onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && (e.preventDefault(), toggle(tool.id))}
               >
-                <strong>{tool.name}</strong>
+                <strong>
+                  {tool.name}
+                  {group.recommended.includes(tool.id) && <span className="pill recommended">Recommended</span>}
+                </strong>
                 <div className="tool-status">
                   {tool.installed ? (
                     <span className="pill ok">
                       <CheckCircle2 size={11} />{" "}
-                      {tool.origin === "GameX"
-                        ? `installed ${tool.version ?? ""}`
-                        : tool.origin === "settings"
-                          ? "your custom path"
-                          : "found on your PC"}
+                      {tool.origin === "settings" ? "Installed (your path)" : "Installed"}
                     </span>
                   ) : (
                     <span className="pill muted-pill">not installed</span>
@@ -147,13 +190,14 @@ export default function ToolsPanel({ onChanged }: { onChanged?: () => void }) {
                 </div>
               </div>
               {busy[tool.id] && tool.managed && <ProgressBar progress={progress[tool.id]} />}
-              {errors[tool.id] && <div className="error-text small">{errors[tool.id]}</div>}
+              {errors[tool.id] && <div className="error-text small"><ErrorText text={errors[tool.id]} /></div>}
 
               {open && (
                 <div className="tool-details">
                   <div className="muted small">{tool.description}</div>
                   <div className="small tool-meta">
                     Used for: {tool.usedFor} · {tool.size}
+                    {tool.installed && ` · ${tool.origin === "GameX" ? `GameX's copy ${tool.version ?? ""}` : tool.origin === "settings" ? "your custom path" : "found on your PC"}`}
                   </div>
                   {tool.installed && tool.path && (
                     <div className="small">
@@ -240,6 +284,9 @@ export default function ToolsPanel({ onChanged }: { onChanged?: () => void }) {
           );
         })}
       </ul>
+          </div>
+        );
+      })}
     </section>
   );
 }

@@ -13,7 +13,21 @@ can preview any object, move it to another category, edit smali and XML,
 replace images and sounds (with undo), and rebuild the APK with a new name,
 icon, package, version and permissions, signed with your own key.
 
-## Run it on Windows
+## Download GameX
+
+1. Open the [latest release](https://github.com/suheelpeerzada/GameX/releases/latest).
+2. Download the file ending in `x64-setup.exe` and run it.
+3. Open GameX and drop a game onto its window. To open Android games fully,
+   click **Get tools for Android games** on the welcome screen (one click,
+   Java included).
+
+GameX updates itself: when a new version is out, a button in the status bar
+installs it and restarts. Press **F1** in the app for how-tos and keys.
+
+## Build from source
+
+For developers. Releases are built by `.github/workflows/release.yml` when a
+version tag (`v1.0.1`) is pushed.
 
 1. Install [Node.js](https://nodejs.org/) 20 or newer.
 2. Install [Rust](https://rustup.rs/) with the MSVC toolchain. The installer
@@ -31,7 +45,8 @@ To build an installer: `npm run tauri build` (output in
 
 ## Tools (optional, for APKs)
 
-Without these, an APK import still works but only extracts the APK's files.
+GameX downloads these itself (Settings → Tools, grouped by kind of game). Without
+them, an APK import still works but only extracts the APK's files.
 
 - [apktool](https://apktool.org/) decodes resources and smali, and rebuilds
   the APK. Needs Java.

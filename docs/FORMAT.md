@@ -107,8 +107,8 @@ What an entity or thing is made of; each has a `"type"`:
 | --- | --- |
 | `shape` | `shape` (box, sphere, capsule, cylinder, plane), `size` [x, y, z] in metres, `color` |
 | `model` | `asset` (glTF/GLB) |
-| `sprite` | `asset`, optional `frame`, `size` [w, h], `flipX` |
-| `collider` | `shape`, `size`, `body` (static, dynamic, kinematic), `trigger` |
+| `sprite` | `asset`, optional `frame`, `size` [w, h], `flipX`; an animation adds `frames` (images shown in turn, the first is `asset`) and `fps` |
+| `collider` | `shape`, `size`, `body` (static, dynamic, kinematic), `trigger`; a shape read from a mesh (a house's walls and floors) adds `boxes`, each `[min x, y, z, max x, y, z]` in the entity's space, which are what blocks |
 | `light` | `kind` (directional, point, spot), `color`, `intensity`, `range` |
 | `camera` | `fov` in degrees (3D) or `orthoSize` in metres (2D) |
 | `sound` | `asset`, `volume`, `looped`, `autoplay` |

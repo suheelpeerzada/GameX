@@ -12,6 +12,7 @@
 //!   history/                     undo
 //! ```
 
+pub mod calibrate;
 pub mod combine;
 pub mod commands;
 pub mod export;
@@ -21,5 +22,9 @@ pub mod godot;
 pub mod godot_res;
 pub mod model;
 pub mod project;
+pub mod roles;
+pub mod solid;
+/// A small hand-made project the format tests check.
+#[cfg(test)]
 pub mod sample;
 pub mod unity_scene;

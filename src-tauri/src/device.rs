@@ -7,6 +7,7 @@
 //! LDPlayer's own adb) and any device another adb can see (phones, Google's
 //! emulator).
 
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
@@ -339,15 +340,26 @@ pub fn run(
     mut progress: impl FnMut(&str),
 ) -> Result<Launched, String> {
     let adb = ready(target, &mut progress)?;
-    if replace {
-        progress("Removing the installed copy");
-        let _ = adb.run(&["uninstall", package]);
-    }
-    progress("Installing the game");
-    let apk_arg = apk.to_string_lossy().into_owned();
-    let out = adb.run(&["install", "-r", "-d", &apk_arg])?;
-    if !out.contains("Success") {
-        return Err(install_error(&out));
+    // The same APK already on this device is started as it is (installing is the slow part).
+    let stamp = install_stamp(target, apk);
+    let stamp_file = apk.with_extension("apk.installed");
+    let installed = adb.shell(&format!("pm path {package}")).is_ok_and(|o| o.contains("package:"));
+    let same = !replace && installed && stamp.as_ref().is_some_and(|s| fs::read_to_string(&stamp_file).is_ok_and(|t| &t == s));
+    if !same {
+        if replace {
+            progress("Removing the installed copy");
+            let _ = adb.run(&["uninstall", package]);
+        }
+        progress("Installing the game");
+        let _ = fs::remove_file(&stamp_file);
+        let apk_arg = apk.to_string_lossy().into_owned();
+        let out = adb.run(&["install", "-r", "-d", &apk_arg])?;
+        if !out.contains("Success") {
+            return Err(install_error(&out));
+        }
+        if let Some(s) = &stamp {
+            let _ = fs::write(&stamp_file, s);
+        }
     }
     progress("Starting the game");
     let _ = adb.shell(&format!("am force-stop {package}"));
@@ -357,6 +369,13 @@ pub fn run(
         return Err("The game has no launcher screen, so it can't be started directly.".into());
     }
     Ok(Launched { target: target.into(), package: package.into() })
+}
+
+/// What was installed where: the target and the APK's size and time.
+fn install_stamp(target: &str, apk: &Path) -> Option<String> {
+    let meta = fs::metadata(apk).ok()?;
+    let time = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_millis();
+    Some(format!("{target}|{}|{time}", meta.len()))
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -445,6 +464,20 @@ pub fn ui_dump(target: &str) -> Result<String, String> {
         Some(i) => Ok(text[i..].to_string()),
         None => Err("Android couldn't list the views on screen right now (this happens while a screen keeps animating). Try again in a moment.".into()),
     }
+}
+
+/// Stops (or continues) the game's process: time stands still in it. Used
+/// when there's no debug connection; needs a rooted emulator for most games.
+pub fn freeze(target: &str, package: &str, stop: bool) -> Result<(), String> {
+    let adb = adb_for(target)?;
+    let pid = adb.shell(&format!("pidof {package}"))?.split_whitespace().next().map(String::from).ok_or("The game isn't running.")?;
+    let signal = if stop { "STOP" } else { "CONT" };
+    let out = adb.shell(&format!("kill -{signal} {pid} 2>&1 || su -c 'kill -{signal} {pid}' 2>&1"))?;
+    let lower = out.to_lowercase();
+    if lower.contains("not permitted") || lower.contains("denied") {
+        return Err("Android didn't allow pausing the game. Connect to it in the Live tab (or turn on root in the emulator), then pause.".into());
+    }
+    Ok(())
 }
 
 pub fn stop(target: &str, package: &str) -> Result<(), String> {

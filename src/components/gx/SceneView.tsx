@@ -4,6 +4,7 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { TransformControls } from "three/examples/jsm/controls/TransformControls.js";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { OBJLoader } from "three/examples/jsm/loaders/OBJLoader.js";
+import { clone as cloneSkinned } from "three/examples/jsm/utils/SkeletonUtils.js";
 import type { Entity, Part, Scene, Thing, Transform } from "../../lib/gx";
 import { tidy, transformOf } from "../../lib/gxscene";
 
@@ -73,11 +74,20 @@ function marker(kind: "light" | "camera" | "placeholder", size = 0.3): THREE.Obj
   return mesh;
 }
 
+/** The screen's pixel ratio, capped: a 2x screen draws 1.8x fewer pixels at 1.5 and looks the same. */
+export function pixelRatio(): number {
+  return Math.min(window.devicePixelRatio || 1, 1.5);
+}
+
 /** Images and models used by the scene, each read once. */
 export class Assets {
   private textures = new Map<string, Promise<THREE.Texture>>();
   private models = new Map<string, Promise<THREE.Object3D>>();
   private urls: string[] = [];
+  /** Told about each model once it's in place (the Player animates them). */
+  onModel: ((model: THREE.Object3D) => void) | null = null;
+  /** Told when an image or model has arrived, so a view that draws only on change draws again. */
+  onLoad: (() => void) | null = null;
   constructor(private read: (asset: string) => Promise<ArrayBuffer>) {}
 
   private async url(asset: string, type = ""): Promise<string> {
@@ -100,6 +110,7 @@ export class Assets {
         }
         return tex;
       });
+      t.then(() => this.onLoad?.()).catch(() => {});
       this.textures.set(asset, t);
     }
     return t;
@@ -111,7 +122,8 @@ export class Assets {
       m = this.loadModel(asset);
       this.models.set(asset, m);
     }
-    return m.then((root) => root.clone(true));
+    // Skinned models need their bones copied too; the clips come along in `animations`.
+    return m.then((root) => cloneSkinned(root));
   }
 
   private async loadModel(asset: string): Promise<THREE.Object3D> {
@@ -131,6 +143,7 @@ export class Assets {
     }
     manager.setURLModifier((url) => side.get(url) || side.get(url.split("/").pop() ?? "") || url);
     const gltf = await new GLTFLoader(manager).parseAsync(bytes, "");
+    gltf.scene.animations = gltf.animations;
     return gltf.scene;
   }
 
@@ -154,7 +167,8 @@ export function partObject(part: Part, flat: boolean, showColliders: boolean, as
     }
     case "collider": {
       if (!showColliders) return null;
-      const edges = new THREE.EdgesGeometry(geometry(part, flat));
+      // Walls and floors read from a mesh: every box's edges, in one drawing.
+      const edges = part.boxes?.length ? boxEdges(part.boxes) : new THREE.EdgesGeometry(geometry(part, flat));
       const lines = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: part.trigger ? 0xf5b942 : COLLIDER }));
       // The engine finds colliders by this.
       lines.userData.collider = part;
@@ -198,6 +212,8 @@ export function partObject(part: Part, flat: boolean, showColliders: boolean, as
       const material = new THREE.MeshBasicMaterial({ color: 0x9aa3c0, side: THREE.DoubleSide, transparent: true });
       const mesh = new THREE.Mesh(new THREE.PlaneGeometry(w, h), material);
       if (part.flipX) mesh.scale.x = -1;
+      // Frames the Player shows in turn; the editor shows the first.
+      if (part.frames && part.frames.length > 1) mesh.userData.frames = { assets: part.frames, fps: part.fps ?? 5 };
       assets
         ?.texture(part.asset)
         .then((tex) => {
@@ -226,6 +242,8 @@ export function partObject(part: Part, flat: boolean, showColliders: boolean, as
           });
           holder.remove(box);
           holder.add(model);
+          assets.onModel?.(model);
+          assets.onLoad?.();
         })
         .catch(() => ((box as THREE.Mesh).material as THREE.MeshBasicMaterial).color.set(0xc8483c));
       return holder;
@@ -237,6 +255,27 @@ export function partObject(part: Part, flat: boolean, showColliders: boolean, as
     default:
       return null;
   }
+}
+
+/** The edges of many boxes (`[min x, y, z, max x, y, z]`) as one line geometry. */
+function boxEdges(boxes: number[][]): THREE.BufferGeometry {
+  const out = new Float32Array(boxes.length * 24 * 3);
+  let n = 0;
+  for (const b of boxes) {
+    const corner = (i: number) => [i & 1 ? b[3] : b[0], i & 2 ? b[4] : b[1], i & 4 ? b[5] : b[2]];
+    // Corners that differ in one axis are joined.
+    for (let i = 0; i < 8; i++) {
+      for (const bit of [1, 2, 4]) {
+        if (i & bit) continue;
+        out.set(corner(i), n);
+        out.set(corner(i | bit), n + 3);
+        n += 6;
+      }
+    }
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.BufferAttribute(out, 3));
+  return geo;
 }
 
 /** A tile grid: one mesh per sheet, its UVs set once the sheet's image is known. */
@@ -377,6 +416,10 @@ interface View {
   dragging: boolean;
   draw: () => void;
   assets: Assets;
+  /** Metres per second when flying (Shift: four times). */
+  flySpeed: number;
+  /** Frames still to draw; the view only draws when something has changed. */
+  dirty: number;
 }
 
 /**
@@ -399,7 +442,7 @@ export default function SceneView(props: Props) {
   useEffect(() => {
     const el = host.current!;
     const renderer = new THREE.WebGLRenderer({ antialias: true });
-    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.setPixelRatio(pixelRatio());
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     el.appendChild(renderer.domElement);
@@ -439,8 +482,36 @@ export default function SceneView(props: Props) {
       grid.position.y = -0.02;
     }
     world.add(grid);
+    // Flying (3D): hold the right button to look around; WASD (or the arrows) move, Q/E down and up, Shift faster.
+    // The camera goes through walls; letting go hands back to orbiting round a point ahead.
+    const fly = { on: false, hover: false, keys: new Set<string>(), last: 0, yaw: 0, pitch: 0, x: 0, y: 0 };
+    const FLY_KEYS = new Set(["w", "a", "s", "d", "q", "e", "arrowup", "arrowdown", "arrowleft", "arrowright", "pageup", "pagedown", "shift"]);
+    /** Moves the camera for the held keys; true if it moved. */
+    const flyMove = (now: number): boolean => {
+      const dt = Math.min(0.1, fly.last ? (now - fly.last) / 1000 : 0);
+      fly.last = now;
+      if (ortho || dt === 0 || fly.keys.size === 0) return false;
+      const k = (...names: string[]) => (names.some((n) => fly.keys.has(n)) ? 1 : 0);
+      const held = fly.on ? 1 : 0;
+      const forward = held * (k("w") - k("s")) + k("arrowup") - k("arrowdown");
+      const side = held * (k("d") - k("a")) + k("arrowright") - k("arrowleft");
+      const up = held * (k("e") - k("q")) + k("pageup") - k("pagedown");
+      if (!forward && !side && !up) return false;
+      const dir = camera.getWorldDirection(new THREE.Vector3());
+      const right = new THREE.Vector3().crossVectors(dir, camera.up).normalize();
+      const step = new THREE.Vector3().addScaledVector(dir, forward).addScaledVector(right, side).addScaledVector(camera.up, up);
+      step.normalize().multiplyScalar(v.flySpeed * (fly.keys.has("shift") ? 4 : 1) * dt);
+      camera.position.add(step);
+      orbit.target.add(step);
+      return true;
+    };
+    // Drawn only when something changed (the camera moved, an edit, a load), so an idle view costs nothing.
     const draw = () => {
-      orbit.update();
+      const flew = flyMove(performance.now());
+      // While looking around the camera turns itself; orbiting would pull it back to its point.
+      const orbited = !fly.on && orbit.update();
+      if (!flew && !orbited && !fly.on && v.dirty <= 0) return;
+      v.dirty = Math.max(0, v.dirty - 1);
       // One box around everything selected, following it as it moves.
       outline.visible = v.picked.length > 0;
       if (outline.visible) {
@@ -464,8 +535,66 @@ export default function SceneView(props: Props) {
       }
       renderer.render(world, camera);
     };
-    const v: View = { renderer, world, camera, orbit, gizmo, content, index: new Map(), outline, picked: [], pivot, dragging: false, draw, assets: new Assets((a) => handlers.current.readAsset(a)) };
+    const v: View = { renderer, world, camera, orbit, gizmo, content, index: new Map(), outline, picked: [], pivot, dragging: false, draw, assets: new Assets((a) => handlers.current.readAsset(a)), flySpeed: 5, dirty: 2 };
     view.current = v;
+    const wake = () => (v.dirty = Math.max(v.dirty, 2));
+    v.assets.onLoad = wake;
+    gizmo.addEventListener("change", wake);
+    gizmo.addEventListener("objectChange", wake);
+    for (const type of ["pointerdown", "pointermove", "pointerup", "wheel"]) renderer.domElement.addEventListener(type, wake);
+    if (!ortho) {
+      // The right button looks around (not pans); the middle one pans.
+      orbit.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.PAN, RIGHT: -1 as THREE.MOUSE };
+    }
+    const onFlyDown = (e: PointerEvent) => {
+      if (ortho || e.button !== 2) return;
+      const euler = new THREE.Euler().setFromQuaternion(camera.quaternion, "YXZ");
+      Object.assign(fly, { on: true, yaw: euler.y, pitch: euler.x, x: e.clientX, y: e.clientY });
+      orbit.enabled = false;
+      renderer.domElement.setPointerCapture(e.pointerId);
+    };
+    const onFlyMove = (e: PointerEvent) => {
+      if (!fly.on) return;
+      fly.yaw -= (e.clientX - fly.x) * 0.004;
+      fly.pitch = Math.max(-1.55, Math.min(1.55, fly.pitch - (e.clientY - fly.y) * 0.004));
+      fly.x = e.clientX;
+      fly.y = e.clientY;
+      camera.quaternion.setFromEuler(new THREE.Euler(fly.pitch, fly.yaw, 0, "YXZ"));
+    };
+    const onFlyUp = (e: PointerEvent) => {
+      if (!fly.on || e.button !== 2) return;
+      fly.on = false;
+      for (const k of ["w", "a", "s", "d", "q", "e"]) fly.keys.delete(k);
+      // Orbit from here on round a point just ahead, so nothing jumps.
+      const reach = Math.max(1, camera.position.distanceTo(orbit.target));
+      orbit.target.copy(camera.position).addScaledVector(camera.getWorldDirection(new THREE.Vector3()), Math.min(reach, 10));
+      orbit.enabled = !v.dragging;
+    };
+    const noMenu = (e: Event) => e.preventDefault();
+    const onEnter = () => (fly.hover = true);
+    const onLeave = () => (fly.hover = false);
+    // Keys reach the view first: while flying (or arrows over the view) they move the camera, not the tools.
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (handlers.current.active) wake();
+      if (!handlers.current.active || ortho || (e.target as HTMLElement).closest?.("input, textarea, select")) return;
+      const k = e.key.toLowerCase();
+      if (!FLY_KEYS.has(k)) return;
+      const arrow = k.startsWith("arrow") || k.startsWith("page");
+      if (!(fly.on || (arrow && fly.hover))) return;
+      if (k !== "shift") e.preventDefault();
+      fly.keys.add(k);
+    };
+    const onKeyUp = (e: KeyboardEvent) => fly.keys.delete(e.key.toLowerCase());
+    const onBlur = () => fly.keys.clear();
+    renderer.domElement.addEventListener("pointerdown", onFlyDown);
+    renderer.domElement.addEventListener("pointermove", onFlyMove);
+    renderer.domElement.addEventListener("pointerup", onFlyUp);
+    renderer.domElement.addEventListener("contextmenu", noMenu);
+    renderer.domElement.addEventListener("pointerenter", onEnter);
+    renderer.domElement.addEventListener("pointerleave", onLeave);
+    window.addEventListener("keydown", onKeyDown, true);
+    window.addEventListener("keyup", onKeyUp, true);
+    window.addEventListener("blur", onBlur);
 
     // The handles also report "not dragging" when attached or detached, so
     // only the end of a drag that really started counts as an edit.
@@ -522,7 +651,9 @@ export default function SceneView(props: Props) {
       if (gizmo.axis) return;
       const rect = renderer.domElement.getBoundingClientRect();
       ray.setFromCamera(new THREE.Vector2(((e.clientX - rect.left) / rect.width) * 2 - 1, -((e.clientY - rect.top) / rect.height) * 2 + 1), camera);
-      const hit = ray.intersectObject(content, true).find((h) => h.object.visible && (h.object as THREE.Mesh).isMesh);
+      // Hidden objects (eye off, or inside a hidden parent) don't catch the click.
+      const shown = (o: THREE.Object3D | null): boolean => !o || (o.visible && shown(o.parent));
+      const hit = ray.intersectObject(content, true).find((h) => (h.object as THREE.Mesh).isMesh && shown(h.object));
       let obj: THREE.Object3D | null = hit?.object ?? null;
       while (obj && !obj.userData.entityId) obj = obj.parent;
       handlers.current.onSelect(obj?.userData.entityId ?? null, e.ctrlKey || e.shiftKey || e.metaKey);
@@ -554,16 +685,27 @@ export default function SceneView(props: Props) {
         camera.right = (half * w) / h;
       }
       camera.updateProjectionMatrix();
+      wake();
     };
     const observer = new ResizeObserver(resize);
     observer.observe(el);
     resize();
     return () => {
       renderer.setAnimationLoop(null);
+      for (const type of ["pointerdown", "pointermove", "pointerup", "wheel"]) renderer.domElement.removeEventListener(type, wake);
       observer.disconnect();
       renderer.domElement.removeEventListener("pointerdown", onDown);
       renderer.domElement.removeEventListener("pointerup", onUp);
       renderer.domElement.removeEventListener("pointermove", onMove);
+      renderer.domElement.removeEventListener("pointerdown", onFlyDown);
+      renderer.domElement.removeEventListener("pointermove", onFlyMove);
+      renderer.domElement.removeEventListener("pointerup", onFlyUp);
+      renderer.domElement.removeEventListener("contextmenu", noMenu);
+      renderer.domElement.removeEventListener("pointerenter", onEnter);
+      renderer.domElement.removeEventListener("pointerleave", onLeave);
+      window.removeEventListener("keydown", onKeyDown, true);
+      window.removeEventListener("keyup", onKeyUp, true);
+      window.removeEventListener("blur", onBlur);
       gizmo.detach();
       gizmo.dispose();
       orbit.dispose();
@@ -574,6 +716,11 @@ export default function SceneView(props: Props) {
       view.current = null;
     };
   }, [scene.id, flat, top]);
+
+  // Anything React changed (the scene, the selection, the tools) is drawn next frame.
+  useEffect(() => {
+    if (view.current) view.current.dirty = Math.max(view.current.dirty, 2);
+  });
 
   // Draws only while on screen.
   useEffect(() => {
@@ -603,10 +750,13 @@ export default function SceneView(props: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scene.id, structure, things, showColliders, flat]);
 
-  // Frame the whole scene when it's opened.
+  // When a scene opens: at the player's spawn, as in the game (3D); else the whole scene.
   useEffect(() => {
     const v = view.current;
-    if (v) frame(v, v.content, flat, top);
+    if (!v) return;
+    if (!flat && !top && spawnView(v, scene, things)) return;
+    frame(v, v.content, flat, top);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scene.id, flat, top]);
 
   // Transforms changed in the inspector (or by undo) move objects without a rebuild.
@@ -677,7 +827,11 @@ export default function SceneView(props: Props) {
       className="gx-canvas"
       tabIndex={0}
       onKeyDown={onKey}
-      title={ortho ? "Drag or right-drag to move around, scroll to zoom, click to select. F frames the selection." : "Drag to orbit, right-drag to pan, scroll to zoom, click to select. F frames the selection."}
+      title={
+        ortho
+          ? "Drag or right-drag to move around, scroll to zoom, click to select. F frames the selection."
+          : "Hold the right button to look around; with it held, WASD move, Q/E down and up, Shift faster. Arrows move too. Drag to orbit, middle-drag to pan, scroll to zoom, click to select. F frames the selection."
+      }
     >
       {toolbar && (
         <div ref={floating} className="gx-floating" style={{ display: "none" }}>
@@ -686,6 +840,32 @@ export default function SceneView(props: Props) {
       )}
     </div>
   );
+}
+
+/**
+ * Where most of a scene is: a few huge pieces (a light box hundreds of
+ * metres wide, a far-off helper) would otherwise frame an empty middle.
+ */
+function coreBounds(target: THREE.Object3D): THREE.Box3 {
+  const boxes: THREE.Box3[] = [];
+  target.updateWorldMatrix(true, true);
+  target.traverse((o) => {
+    const m = o as THREE.Mesh;
+    if (m.isMesh && !m.userData.marker) boxes.push(new THREE.Box3().setFromObject(m));
+  });
+  if (boxes.length < 8) return boundsOf(target);
+  const centers = boxes.map((b) => b.getCenter(new THREE.Vector3()));
+  const pick = (axis: "x" | "y" | "z", f: number) => {
+    const list = centers.map((c) => c[axis]).sort((a, b) => a - b);
+    return list[Math.floor(f * (list.length - 1))];
+  };
+  const lo = new THREE.Vector3(pick("x", 0.05), pick("y", 0.05), pick("z", 0.05));
+  const hi = new THREE.Vector3(pick("x", 0.95), pick("y", 0.95), pick("z", 0.95));
+  const core = new THREE.Box3(lo, hi).expandByScalar(Math.max(1, lo.distanceTo(hi) * 0.1));
+  const limit = core.getSize(new THREE.Vector3()).length() * 1.5;
+  const box = new THREE.Box3();
+  for (const b of boxes) if (b.intersectsBox(core) && b.getSize(new THREE.Vector3()).length() <= limit) box.union(b);
+  return box.isEmpty() ? core : box;
 }
 
 /** What `target` covers, editor markers left out. */
@@ -701,9 +881,57 @@ function boundsOf(target: THREE.Object3D): THREE.Box3 {
   return box;
 }
 
+/**
+ * The player the game would start with (as Play picks it): a thing with the
+ * player role, else one named so; one switched on (with all its parents)
+ * first, else one the game switches on itself.
+ */
+function playerOf(scene: Scene, things: Record<string, Thing>): string | null {
+  const all: { e: Entity; on: boolean }[] = [];
+  const visit = (list: Entity[], on: boolean) => {
+    for (const e of list) {
+      all.push({ e, on: on && e.active !== false });
+      visit(e.children ?? [], on && e.active !== false);
+    }
+  };
+  visit(scene.entities, true);
+  const tests = [(e: Entity) => !!e.thing && things[e.thing]?.role === "player", (e: Entity) => /\bplayer\b/i.test(e.name.replace(/([a-z])([A-Z])/g, "$1 $2"))];
+  // The role first, then the name: being switched on only decides between the same kind.
+  for (const test of tests) {
+    const found = all.find((x) => x.on && test(x.e)) ?? all.find((x) => test(x.e));
+    if (found) return found.e.id;
+  }
+  return null;
+}
+
+/** Puts the camera where the player starts, at eye height, looking into the level. False if there's no player. */
+function spawnView(v: View, scene: Scene, things: Record<string, Thing>): boolean {
+  const id = playerOf(scene, things);
+  const player = id ? v.index.get(id) : undefined;
+  if (!player || !(v.camera instanceof THREE.PerspectiveCamera)) return false;
+  player.updateWorldMatrix(true, false);
+  const feet = player.getWorldPosition(new THREE.Vector3());
+  const scale = player.getWorldScale(new THREE.Vector3());
+  const eye = feet.clone().add(new THREE.Vector3(0, 1.6 * Math.min(Math.abs(scale.y), 3), 0));
+  // Toward the middle of the level (where most things are), level with the eye.
+  const spots: THREE.Vector3[] = [];
+  v.index.forEach((o) => spots.push(o.getWorldPosition(new THREE.Vector3())));
+  const mid = (axis: "x" | "z") => spots.map((p) => p[axis]).sort((a, b) => a - b)[Math.floor(spots.length / 2)] ?? 0;
+  const look = new THREE.Vector3(mid("x"), eye.y, mid("z"));
+  if (look.distanceTo(eye) < 0.5) look.set(eye.x, eye.y, eye.z - 1);
+  v.camera.position.copy(eye);
+  v.camera.near = 0.05;
+  v.camera.far = 5000;
+  v.camera.updateProjectionMatrix();
+  v.camera.lookAt(look);
+  v.orbit.target.copy(eye).addScaledVector(look.clone().sub(eye).normalize(), 3);
+  v.flySpeed = 5;
+  return true;
+}
+
 /** Points the camera at `target`'s bounds. */
 function frame(v: View, target: THREE.Object3D, flat: boolean, top = false) {
-  const box = boundsOf(target);
+  const box = target === v.content ? coreBounds(target) : boundsOf(target);
   // An empty scene: a comfortable view of the origin.
   if (target === v.content && box.getSize(new THREE.Vector3()).length() < 3.5) {
     box.setFromCenterAndSize(new THREE.Vector3(), new THREE.Vector3(10, 10, 10));

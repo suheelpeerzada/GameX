@@ -49,8 +49,8 @@ export type LightKind = "directional" | "point" | "spot";
 export type Part =
   | { type: "shape"; shape: ShapeKind; size: Vec3; color: string }
   | { type: "model"; asset: string }
-  | { type: "sprite"; asset: string; frame?: string; size?: [number, number]; flipX?: boolean }
-  | { type: "collider"; shape: ShapeKind; size: Vec3; body: Body; trigger?: boolean }
+  | { type: "sprite"; asset: string; frame?: string; size?: [number, number]; flipX?: boolean; frames?: string[]; fps?: number }
+  | { type: "collider"; shape: ShapeKind; size: Vec3; body: Body; trigger?: boolean; /** Walls and floors read from a mesh: [min x, y, z, max x, y, z] in the entity's space. */ boxes?: [number, number, number, number, number, number][] }
   | { type: "light"; kind: LightKind; color: string; intensity: number; range?: number }
   | { type: "camera"; fov?: number; orthoSize?: number }
   | { type: "sound"; asset: string; volume: number; looped?: boolean; autoplay?: boolean }
@@ -140,18 +140,20 @@ export interface Behavior {
   rules: Rule[];
 }
 
-export interface ProjectEntry {
-  path: string;
-  name: string;
-  sources: number;
-  modified: number;
-}
-
 export interface Item {
   id: string;
   name: string;
   file: string;
   kind?: string;
+}
+
+/** Where a translated element came from (src-tauri/src/gx/model.rs Origin). */
+export interface Origin {
+  file: string;
+  object?: string;
+  field?: string;
+  fidelity: "exact" | "approximated" | "missing";
+  note?: string;
 }
 
 export interface ProjectIndex {
@@ -164,6 +166,7 @@ export interface ProjectIndex {
   assets: string[];
   problems: { file: string; message: string }[];
   undo?: string;
+  redo?: string;
 }
 
 /** What a translation did (src-tauri/src/gx/godot.rs Report). */
@@ -192,12 +195,10 @@ export interface SentToGame {
 }
 
 export const gx = {
-  projectsRoot: () => invoke<string>("gx_projects_root"),
-  listProjects: () => invoke<ProjectEntry[]>("gx_list_projects"),
-  createProject: (name: string, sample = false) => invoke<string>("gx_create_project", { name, sample }),
   openProject: (path: string) => invoke<ProjectIndex>("gx_open_project", { path }),
+  /** The index and every thing, in one call. */
+  openWithThings: (path: string) => invoke<{ index: ProjectIndex; things: Thing[] }>("gx_open_with_things", { path }),
   loadScene: (path: string, id: string) => invoke<Scene>("gx_load_scene", { path, id }),
-  loadThing: (path: string, id: string) => invoke<Thing>("gx_load_thing", { path, id }),
   loadBehavior: (path: string, id: string) => invoke<Behavior>("gx_load_behavior", { path, id }),
   /** The save calls return what Undo would now take back. */
   saveScene: (path: string, scene: Scene, summary: string) => invoke<string | null>("gx_save_scene", { path, scene, summary }),
@@ -205,14 +206,15 @@ export const gx = {
   saveBehavior: (path: string, behavior: Behavior, summary: string) =>
     invoke<string | null>("gx_save_behavior", { path, behavior, summary }),
   /** The layer made for an imported game, if any. */
-  layerForImport: (id: string) => invoke<string | null>("gx_layer_for_import", { id }),
+  /** `outdated`: made by an older reader; reading the game again places things better. */
+  layerForImport: (id: string) => invoke<{ path: string; outdated: boolean } | null>("gx_layer_for_import", { id }),
+  /** Keeps an outdated layer (stops asking). */
+  keepLayer: (id: string) => invoke<void>("gx_keep_layer", { id }),
   /** Combined Workspace: translates another imported game into this layer. */
   addGame: (path: string, id: string) =>
     invoke<{ merged: { source: string; scenes: number; things: number; assets: number; renamed: [string, string][] }; report: TranslationReport }>("gx_add_game", { path, id }),
   /** Reads how an imported game builds its levels and makes its layer. */
   makeLayer: (id: string) => invoke<{ path: string; report: TranslationReport }>("gx_make_layer", { id }),
-  /** Translates a Godot project folder into a new GameX project. */
-  translateGodot: (folder: string) => invoke<{ path: string; report: TranslationReport }>("gx_translate_godot", { folder }),
   /** Output A: the layer's changed assets into the imported game's edits, for the usual Build. */
   sendToGame: (id: string) => invoke<SentToGame>("gx_send_to_game", { id }),
   /** Replaces a layer asset with a picked file; returns what Undo would take back. */
@@ -222,4 +224,8 @@ export const gx = {
   saveInfo: (path: string, info: ProjectInfo, summary: string) => invoke<string | null>("gx_save_info", { path, info, summary }),
   /** [what was undone, what Undo would take back next]. */
   undo: (path: string) => invoke<[string | null, string | null]>("gx_undo", { path }),
+  /** Where each translated element came from, and how faithful it is (see Origin). */
+  origins: (path: string) => invoke<Record<string, Origin>>("gx_origins", { path }),
+  /** [what was redone, what Redo would bring back next]. */
+  redo: (path: string) => invoke<[string | null, string | null]>("gx_redo", { path }),
 };

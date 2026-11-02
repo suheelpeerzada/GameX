@@ -7,8 +7,7 @@ use tauri::{AppHandle, Manager};
 use walkdir::WalkDir;
 
 use super::model::{Behavior, ProjectInfo, Scene, Thing};
-use super::project::{self, History, ProjectEntry, ProjectIndex};
-use super::sample;
+use super::project::{self, History, ProjectIndex};
 
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> std::io::Result<T> + Send + 'static) -> Result<T, String> {
     tauri::async_runtime::spawn_blocking(f).await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())
@@ -23,38 +22,25 @@ fn root(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 #[tauri::command]
-pub fn gx_projects_root(app: AppHandle) -> Result<String, String> {
-    root(&app).map(|p| p.display().to_string())
-}
-
-#[tauri::command]
-pub async fn gx_list_projects(app: AppHandle) -> Result<Vec<ProjectEntry>, String> {
-    let root = root(&app)?;
-    blocking(move || project::list(&root)).await
-}
-
-/// Creates a project (or the sample project) and returns its folder.
-#[tauri::command]
-pub async fn gx_create_project(app: AppHandle, name: String, sample: bool) -> Result<String, String> {
-    let root = root(&app)?;
-    blocking(move || if sample { sample::create(&root) } else { project::create(&root, &name) })
-        .await
-        .map(|p| p.display().to_string())
-}
-
-#[tauri::command]
 pub async fn gx_open_project(path: String) -> Result<ProjectIndex, String> {
     blocking(move || project::open(&PathBuf::from(path))).await
+}
+
+#[derive(serde::Serialize)]
+pub struct Opened {
+    index: ProjectIndex,
+    things: Vec<Thing>,
+}
+
+/// The index and every thing, in one call (the editor's first load).
+#[tauri::command]
+pub async fn gx_open_with_things(path: String) -> Result<Opened, String> {
+    blocking(move || project::open_with_things(&PathBuf::from(path)).map(|(index, things)| Opened { index, things })).await
 }
 
 #[tauri::command]
 pub async fn gx_load_scene(path: String, id: String) -> Result<Scene, String> {
     blocking(move || project::load_scene(&PathBuf::from(path), &id)).await
-}
-
-#[tauri::command]
-pub async fn gx_load_thing(path: String, id: String) -> Result<Thing, String> {
-    blocking(move || project::load_thing(&PathBuf::from(path), &id)).await
 }
 
 #[tauri::command]
@@ -119,23 +105,72 @@ const LAYER_LINK: &str = "layer.json";
 #[derive(serde::Serialize, serde::Deserialize)]
 struct LayerLink {
     path: String,
+    /// The reader version the layer was made with (links from before versions: 1).
+    #[serde(default = "first_reader")]
+    reader: u32,
+}
+
+fn first_reader() -> u32 {
+    1
+}
+
+/// Bumped when an engine's reader places things differently, so layers made
+/// before are offered a fresh read. 2: roles from what things do; Unity:
+/// static-batched meshes cut apart.
+fn reader_version(engine: &str) -> u32 {
+    match engine {
+        // Godot 3: animated sprites play their frames. Unity 3: solid floors and walls from mesh colliders.
+        "unity" | "godot" => 3,
+        _ => 1,
+    }
+}
+
+/// The newest reader version for the games in the layer at `path`.
+fn layer_reader(path: &std::path::Path) -> u32 {
+    project::read_info(path).map(|info| info.sources.iter().map(|s| reader_version(&s.engine)).max().unwrap_or(1)).unwrap_or(1)
+}
+
+fn write_link(workspace: &crate::workspace::Workspace, id: &str, link: &LayerLink) -> std::io::Result<()> {
+    std::fs::write(workspace.project_dir(id)?.join(LAYER_LINK), serde_json::to_string_pretty(link).map_err(std::io::Error::other)?)
+}
+
+#[derive(serde::Serialize)]
+pub struct Layer {
+    path: String,
+    /// Made by an older reader: reading the game again places things better.
+    outdated: bool,
 }
 
 /// The layer (GameX project) made for an imported game, if there is one.
 #[tauri::command]
-pub async fn gx_layer_for_import(state: tauri::State<'_, crate::commands::AppState>, id: String) -> Result<Option<String>, String> {
+pub async fn gx_layer_for_import(state: tauri::State<'_, crate::commands::AppState>, id: String) -> Result<Option<Layer>, String> {
     let workspace = state.workspace();
     blocking(move || {
         let link = workspace.project_dir(&id)?.join(LAYER_LINK);
         let Ok(text) = std::fs::read_to_string(link) else { return Ok(None) };
         let link: LayerLink = serde_json::from_str(&text).map_err(std::io::Error::other)?;
-        Ok(PathBuf::from(&link.path).join(project::PROJECT_FILE).is_file().then_some(link.path))
+        let dir = PathBuf::from(&link.path);
+        if !dir.join(project::PROJECT_FILE).is_file() {
+            return Ok(None);
+        }
+        Ok(Some(Layer { outdated: link.reader < layer_reader(&dir), path: link.path }))
     })
     .await
 }
 
-/// Reads an imported game with the reader for its engine into the new,
-/// empty GameX project at `dir`.
+/// Keeps an outdated layer as it is (the user chose not to read the game again).
+#[tauri::command]
+pub async fn gx_keep_layer(state: tauri::State<'_, crate::commands::AppState>, id: String) -> Result<(), String> {
+    let workspace = state.workspace();
+    blocking(move || {
+        let text = std::fs::read_to_string(workspace.project_dir(&id)?.join(LAYER_LINK))?;
+        let mut link: LayerLink = serde_json::from_str(&text).map_err(std::io::Error::other)?;
+        link.reader = layer_reader(std::path::Path::new(&link.path));
+        write_link(&workspace, &id, &link)
+    })
+    .await
+}
+
 /// A game's name as people know it: its launcher label, else the import's name.
 fn game_name(workspace: &crate::workspace::Workspace, id: &str) -> std::io::Result<String> {
     let record = workspace.load_record(id)?;
@@ -143,6 +178,8 @@ fn game_name(workspace: &crate::workspace::Workspace, id: &str) -> std::io::Resu
     Ok(if label.is_empty() { record.name } else { label })
 }
 
+/// Reads an imported game with the reader for its engine into the new,
+/// empty GameX project at `dir`.
 fn translate_import(workspace: &crate::workspace::Workspace, id: &str, dir: &std::path::Path) -> std::io::Result<super::godot::Report> {
     let mut record = workspace.load_record(id)?;
     // The source ID stays the import's (export finds the game by it); the name is the label.
@@ -181,8 +218,7 @@ pub async fn gx_make_layer(app: AppHandle, state: tauri::State<'_, crate::comman
         let dir = project::create(&root, &game_name(&workspace, &id)?)?;
         match translate_import(&workspace, &id, &dir) {
             Ok(report) => {
-                let link = LayerLink { path: dir.display().to_string() };
-                std::fs::write(workspace.project_dir(&id)?.join(LAYER_LINK), serde_json::to_string_pretty(&link).map_err(std::io::Error::other)?)?;
+                write_link(&workspace, &id, &LayerLink { path: dir.display().to_string(), reader: layer_reader(&dir) })?;
                 Ok(Translated { path: dir.display().to_string(), report })
             }
             Err(e) => {
@@ -353,28 +389,6 @@ pub async fn gx_replace_asset(path: String, asset: String, file: String) -> Resu
     .await
 }
 
-/// Translates a Godot project folder into a new GameX project.
-#[tauri::command]
-pub async fn gx_translate_godot(app: AppHandle, folder: String) -> Result<Translated, String> {
-    let root = root(&app)?;
-    blocking(move || {
-        let src = PathBuf::from(&folder);
-        let name = super::godot::game_name(&src)
-            .or_else(|| src.file_name().map(|n| n.to_string_lossy().into_owned()))
-            .unwrap_or_else(|| "Godot game".into());
-        let dir = project::create(&root, &name)?;
-        match super::godot::translate(&src, &dir, &project::slug(&name), &name) {
-            Ok(report) => Ok(Translated { path: dir.display().to_string(), report }),
-            Err(e) => {
-                // A failed translation leaves no half-made project behind.
-                let _ = std::fs::remove_dir_all(&dir);
-                Err(e)
-            }
-        }
-    })
-    .await
-}
-
 #[tauri::command]
 pub async fn gx_delete_scene(path: String, id: String, summary: String) -> Result<Option<String>, String> {
     blocking(move || {
@@ -396,6 +410,25 @@ pub async fn gx_save_info(path: String, info: ProjectInfo, summary: String) -> R
     .await
 }
 
+/// Where each translated element came from and how faithful it is, from every
+/// game in the layer (`sources/*/origin.json`), keyed as the readers write them
+/// (`entity:<file>:<id>`, `thing:<id>`, `asset:<path>`, `scene:<id>`).
+#[tauri::command]
+pub async fn gx_origins(path: String) -> Result<std::collections::BTreeMap<String, super::model::Origin>, String> {
+    blocking(move || {
+        let mut all = std::collections::BTreeMap::new();
+        let Ok(dirs) = std::fs::read_dir(PathBuf::from(path).join("sources")) else { return Ok(all) };
+        for dir in dirs.flatten() {
+            let Ok(text) = std::fs::read_to_string(dir.path().join("origin.json")) else { continue };
+            if let Ok(map) = serde_json::from_str::<super::model::OriginMap>(&text) {
+                all.extend(map.entries);
+            }
+        }
+        Ok(all)
+    })
+    .await
+}
+
 /// Takes back the newest change: (what was undone, what Undo would take back next).
 #[tauri::command]
 pub async fn gx_undo(path: String) -> Result<(Option<String>, Option<String>), String> {
@@ -403,6 +436,17 @@ pub async fn gx_undo(path: String) -> Result<(Option<String>, Option<String>), S
         let history = History::new(&PathBuf::from(path));
         let undone = history.undo()?;
         Ok((undone, history.last()?))
+    })
+    .await
+}
+
+/// Brings back the change Undo took back last: (what was redone, what Redo would bring back next).
+#[tauri::command]
+pub async fn gx_redo(path: String) -> Result<(Option<String>, Option<String>), String> {
+    blocking(move || {
+        let history = History::new(&PathBuf::from(path));
+        let redone = history.redo()?;
+        Ok((redone, history.next_redo()?))
     })
     .await
 }

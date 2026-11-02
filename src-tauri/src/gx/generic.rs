@@ -14,7 +14,8 @@ use std::path::{Path, PathBuf};
 use base64::Engine as _;
 use walkdir::WalkDir;
 
-use super::godot::{guess_kind, Report};
+use super::godot::Report;
+use super::roles::guess_kind;
 use super::model::*;
 use super::project::{self, write_json};
 
@@ -199,7 +200,7 @@ fn things_from_images(images: &[(String, String, [u32; 2])]) -> Vec<(Thing, Stri
     let sizes: HashMap<&str, [u32; 2]> = images.iter().map(|(_, a, s)| (a.as_str(), *s)).collect();
     let mut out = Vec::new();
     for (key, mut g) in groups {
-        let (mut kind, role) = guess_kind(&g.name.join(" "), "");
+        let (mut kind, role) = guess_kind(&g.name.join(" "));
         // Walking, jumping... frames, or frames facing several ways: it moves.
         let moving = g.frames.iter().any(|(_, t)| t.iter().any(|w| MOVING_WORDS.contains(&w.as_str())))
             || g.frames.iter().filter_map(|(_, t)| t.iter().find(|w| DIRECTION_WORDS.contains(&w.as_str()))).collect::<std::collections::HashSet<_>>().len() >= 2;
@@ -217,8 +218,8 @@ fn things_from_images(images: &[(String, String, [u32; 2])]) -> Vec<(Thing, Stri
         let (w, h) = (w as f32 / PPU, h as f32 / PPU);
         let body = if kind == ThingKind::Character { Body::Kinematic } else { Body::Static };
         let mut parts = vec![
-            Part::Sprite { asset: asset.clone(), frame: None, size: Some([w, h]), flip_x: false },
-            Part::Collider { shape: ShapeKind::Box, size: [w * 0.8, h * 0.9, 1.0], body, trigger: kind == ThingKind::Item },
+            Part::Sprite { asset: asset.clone(), frame: None, size: Some([w, h]), flip_x: false, frames: Vec::new(), fps: None },
+            Part::Collider { shape: ShapeKind::Box, size: [w * 0.8, h * 0.9, 1.0], body, trigger: kind == ThingKind::Item, boxes: Vec::new() },
         ];
         if g.frames.len() > 1 {
             let mut values = BTreeMap::new();
@@ -805,7 +806,7 @@ fn map_scene(map: &Map, id: &str, name: &str, ctx: &mut MapCtx) -> Scene {
                     } else if o.w > 0.0 && o.h > 0.0 && !o.point {
                         let trigger = has_word(&format!("{} {}", o.name, o.kind), TRIGGER_WORDS);
                         e.transform.position = [(o.x + o.w / 2.0) / PPU, -(o.y + o.h / 2.0) / PPU, 0.0];
-                        e.parts.push(Part::Collider { shape: ShapeKind::Box, size: [o.w / PPU, o.h / PPU, 1.0], body: Body::Static, trigger });
+                        e.parts.push(Part::Collider { shape: ShapeKind::Box, size: [o.w / PPU, o.h / PPU, 1.0], body: Body::Static, trigger, boxes: Vec::new() });
                     } else {
                         // A point: a spawn place, kept as a marker.
                         e.transform.position = [o.x / PPU, -o.y / PPU, 0.0];
@@ -836,12 +837,20 @@ fn map_scene(map: &Map, id: &str, name: &str, ctx: &mut MapCtx) -> Scene {
 #[serde(rename_all = "camelCase")]
 pub struct Captured {
     pub scene: String,
+    /// The scene's name, as the editor lists it.
+    pub name: String,
+    /// Objects in the scene.
     pub objects: usize,
+    /// Objects left out: not placed, the game's tables and grids, off the screen.
+    pub skipped: usize,
     /// Objects placed as one of the layer's things.
     pub matched: usize,
-    /// The game's screen behind them: "aligned" (by the picker's calibration),
-    /// "assumed" (game units taken as screen pixels), or "none".
+    /// The game's screen behind them: "aligned" (by the picker's calibration), "auto"
+    /// (lined up from sprites found in it), "assumed" (one game unit taken as one
+    /// pixel), or "none".
     pub backdrop: String,
+    /// The mapping found from the sprites, for the picker to keep.
+    pub calibration: Option<[f64; 4]>,
 }
 
 /// The game's screen at the moment of capture: a PNG, and how the game's
@@ -851,18 +860,120 @@ pub struct Snapshot {
     pub calibration: Option<[f64; 4]>,
 }
 
-/// The thing a game class stands for: "com.g.ZombieEnemy" -> "zombie" (the longest thing named in it).
-fn thing_for_class<'a>(class: &str, things: &'a [Thing]) -> Option<&'a Thing> {
+/// Words in class names that say what sort of code object it is, not what it is
+/// ("lampItemInfo" is a lamp, "frankyGuarding" is Franky).
+const CLASS_NOISE: &[&str] = &[
+    "item", "info", "decoration", "decor", "object", "obj", "actor", "entity", "sprite", "mng", "manager", "data", "controller", "ctrl", "base", "node", "impl",
+    "normal", "guarding", "state", "motion", "container",
+];
+
+/// The thing a game class stands for: "com.g.ZombieEnemy" -> "zombie", "lampItemInfo" -> "lamp".
+pub(crate) fn thing_for_class<'a>(class: &str, things: &'a [Thing]) -> Option<&'a Thing> {
     let simple = class.rsplit(['.', '$']).next().unwrap_or(class);
     let words = tokens(simple);
-    let joined = words.join("");
+    let core: Vec<&String> = words.iter().filter(|w| !CLASS_NOISE.contains(&w.as_str())).collect();
+    let joined = if core.is_empty() { words.join("") } else { core.iter().map(|w| w.as_str()).collect::<Vec<_>>().join("") };
     things
         .iter()
         .filter(|t| {
             let id = t.id.replace('-', "");
-            id.len() >= 3 && joined.contains(&id)
+            id.len() >= 3 && (joined.contains(&id) || (joined.len() >= 4 && id.starts_with(&joined)))
         })
-        .max_by_key(|t| t.id.len())
+        // The same name first, then the longest one named in the class.
+        .max_by_key(|t| {
+            let id = t.id.replace('-', "");
+            (id == joined, id.len())
+        })
+}
+
+/// Classes that hold what's on screen, and how many objects were left out: those not
+/// placed (at exactly 0, 0), classes whose objects are all crowded into a small spot
+/// (the game's tables or grid data, not things), the map itself, and, when the mapping
+/// to the screen is known, anything outside the screen.
+fn on_screen(groups: BTreeMap<String, Vec<(f64, f64)>>, view: Option<([f64; 4], f64, f64)>) -> (BTreeMap<String, Vec<(f64, f64)>>, usize) {
+    let mut skipped = 0;
+    let mut out = BTreeMap::new();
+    for (class, list) in groups {
+        let simple = class.rsplit(['.', '$']).next().unwrap_or(&class);
+        let before = list.len();
+        if tokens(simple).iter().all(|w| w == "map" || CLASS_NOISE.contains(&w.as_str())) {
+            skipped += before;
+            continue;
+        }
+        let placed: Vec<(f64, f64)> = list.into_iter().filter(|&(x, y)| x != 0.0 || y != 0.0).collect();
+        let (min_x, max_x) = placed.iter().fold((f64::MAX, f64::MIN), |(a, b), p| (a.min(p.0), b.max(p.0)));
+        let (min_y, max_y) = placed.iter().fold((f64::MAX, f64::MIN), |(a, b), p| (a.min(p.1), b.max(p.1)));
+        let crowded = placed.len() >= 8 && max_x - min_x < 40.0 && max_y - min_y < 40.0;
+        let kept: Vec<(f64, f64)> = if crowded {
+            Vec::new()
+        } else {
+            placed
+                .into_iter()
+                .filter(|&(x, y)| match view {
+                    Some(([ax, bx, ay, by], w, h)) => {
+                        let (sx, sy) = (ax * x + bx, ay * y + by);
+                        sx >= -0.1 * w && sx <= 1.1 * w && sy >= -0.1 * h && sy <= 1.1 * h
+                    }
+                    None => true,
+                })
+                .collect()
+        };
+        skipped += before - kept.len();
+        if !kept.is_empty() {
+            out.insert(class, kept);
+        }
+    }
+    (out, skipped)
+}
+
+/// Works out how game units map onto the screenshot from objects whose sprite GameX
+/// knows: each is looked for in the picture, and where it shows against where the game
+/// says it is gives the mapping. Only classes with a single object are used (with
+/// several, which one was found can't be told).
+fn auto_calibrate(dir: &Path, groups: &BTreeMap<String, Vec<(f64, f64)>>, things: &[Thing], screen: &super::calibrate::Image) -> Option<[f64; 4]> {
+    let mut candidates: Vec<(bool, f64, f64, Vec<std::path::PathBuf>)> = Vec::new();
+    for (class, list) in groups {
+        let [(x, y)] = list.as_slice() else { continue };
+        let Some(t) = thing_for_class(class, things) else { continue };
+        let Some(asset) = t.parts.iter().find_map(|p| if let Part::Sprite { asset, .. } = p { Some(asset.clone()) } else { None }) else { continue };
+        // It may face another way on screen: the first frame of each of its animations too.
+        let frames: Vec<String> = t
+            .parts
+            .iter()
+            .find_map(|p| if let Part::Custom { name, values } = p { if name == "Animation" { values.get("frames").cloned() } else { None } } else { None })
+            .and_then(|v| if let Value::Text(t) = v { Some(t) } else { None })
+            .map(|t| t.split(',').map(String::from).collect())
+            .unwrap_or_default();
+        let firsts = frames.iter().filter(|f| {
+            let stem = f.rsplit('/').next().unwrap_or(f).trim_end_matches(".png");
+            (stem.ends_with('1') && !stem.ends_with("11")) || !stem.ends_with(|c: char| c.is_ascii_digit())
+        });
+        let mut looks: Vec<String> = std::iter::once(asset).chain(firsts.cloned()).filter(|a| a.to_ascii_lowercase().ends_with(".png")).collect();
+        looks.dedup();
+        looks.truncate(8);
+        if !looks.is_empty() {
+            candidates.push((t.kind == ThingKind::Character, *x, *y, looks.into_iter().map(|a| dir.join("assets").join(a)).collect()));
+        }
+    }
+    // Characters first: they stand out from the background best.
+    candidates.sort_by_key(|c| !c.0);
+    let mut points = Vec::new();
+    for (_, x, y, files) in candidates.into_iter().take(6) {
+        let best = files
+            .iter()
+            .filter_map(|f| fs::read(f).ok().and_then(|b| super::calibrate::decode_png(&b)))
+            .flat_map(|sprite| {
+                let flipped = super::calibrate::mirrored(&sprite);
+                [sprite, flipped]
+            })
+            .filter_map(|sprite| super::calibrate::find(screen, &sprite))
+            .min_by(|a, b| a.2.total_cmp(&b.2));
+        // A close colour match only (mean difference out of 765 for three channels).
+        if let Some((sx, sy, _)) = best.filter(|b| b.2 < 65.0) {
+            points.push((x, y, sx, sy));
+        }
+    }
+    super::calibrate::solve(&points)
 }
 
 /// Builds a scene from where the running game's objects are (game units, y down),
@@ -882,12 +993,31 @@ pub fn capture(dir: &Path, positions: &[(String, f64, f64)], ppu: f32, snapshot:
         }
         id
     };
-    let mut groups: BTreeMap<String, Vec<(f64, f64)>> = BTreeMap::new();
+    let mut all: BTreeMap<String, Vec<(f64, f64)>> = BTreeMap::new();
     for (class, x, y) in positions {
-        groups.entry(class.clone()).or_default().push((*x, *y));
+        all.entry(class.clone()).or_default().push((*x, *y));
     }
+
+    // The screenshot, and how game units map onto it: the picker's calibration,
+    // else found from the sprites in it, else one unit taken as one pixel.
+    let shot = snapshot.filter(|s| !s.png.is_empty());
+    let screen = shot.and_then(|s| super::calibrate::decode_png(&s.png));
+    let given = shot.and_then(|s| s.calibration).filter(|c| c[0].abs() > 1e-9 && c[2].abs() > 1e-9);
+    let (rough, _) = on_screen(all.clone(), None);
+    let found = if given.is_none() { screen.as_ref().and_then(|img| auto_calibrate(dir, &rough, &things, img)) } else { None };
+    let calibration = given.or(found);
+    let backdrop = match (&screen, given, found) {
+        (None, _, _) => "none",
+        (Some(_), Some(_), _) => "aligned",
+        (Some(_), None, Some(_)) => "auto",
+        (Some(_), None, None) => "assumed",
+    };
+    let view = calibration.zip(screen.as_ref()).map(|(c, img)| (c, img.w as f64, img.h as f64));
+    let (groups, skipped) = on_screen(all, view);
+
     let mut entities = Vec::new();
     let mut matched = 0;
+    let mut kept = 0;
     for (class, list) in &groups {
         let simple = class.rsplit(['.', '$']).next().unwrap_or(class).to_string();
         let thing = thing_for_class(class, &things);
@@ -909,6 +1039,7 @@ pub fn capture(dir: &Path, positions: &[(String, f64, f64)], ppu: f32, snapshot:
             values.insert("class".into(), Value::Text(class.clone()));
             e.parts.push(Part::Custom { name: "Game object".into(), values });
             group.children.push(e);
+            kept += 1;
         }
         entities.push(group);
     }
@@ -922,27 +1053,23 @@ pub fn capture(dir: &Path, positions: &[(String, f64, f64)], ppu: f32, snapshot:
     let name = if id == base { "Captured level".to_string() } else { format!("Captured level {}", n - 1) };
 
     // The game's screen as the level's backdrop, under its objects, lined up with them.
-    let mut backdrop = "none".to_string();
-    if let Some(shot) = snapshot.filter(|s| !s.png.is_empty()) {
-        if let Ok(size) = imagesize::blob_size(&shot.png) {
-            let (w, h) = (size.width as f64, size.height as f64);
-            let [ax, bx, ay, by] = shot.calibration.filter(|c| c[0].abs() > 1e-9 && c[2].abs() > 1e-9).unwrap_or([1.0, 0.0, 1.0, 0.0]);
-            backdrop = if shot.calibration.is_some() { "aligned" } else { "assumed" }.into();
-            let source = index.info.sources.first().map(|s| s.id.clone()).unwrap_or_else(|| "captured".into());
-            let asset = format!("textures/{source}/captured/{id}.png");
-            let target = dir.join("assets").join(&asset);
-            fs::create_dir_all(target.parent().unwrap_or(dir))?;
-            fs::write(&target, &shot.png)?;
-            // The picture's middle and size, in the game's units, then in metres.
-            let (cx, cy) = ((w / 2.0 - bx) / ax, (h / 2.0 - by) / ay);
-            let (gw, gh) = (w / ax.abs(), h / ay.abs());
-            let r = |v: f64| ((v / ppu as f64) * 1000.0).round() as f32 / 1000.0;
-            let mut e = Entity::new(&unique("screen"), "Game screen (backdrop)");
-            e.transform.position = [r(cx), -r(cy) + 0.0, -0.5];
-            e.parts.push(Part::Sprite { asset, frame: None, size: Some([r(gw), r(gh)]), flip_x: ax < 0.0 });
-            e.tags.push("no-collide".into());
-            entities.insert(0, e);
-        }
+    if let (Some(shot), Some(img)) = (shot, screen.as_ref()) {
+        let (w, h) = (img.w as f64, img.h as f64);
+        let [ax, bx, ay, by] = calibration.unwrap_or([1.0, 0.0, 1.0, 0.0]);
+        let source = index.info.sources.first().map(|s| s.id.clone()).unwrap_or_else(|| "captured".into());
+        let asset = format!("textures/{source}/captured/{id}.png");
+        let target = dir.join("assets").join(&asset);
+        fs::create_dir_all(target.parent().unwrap_or(dir))?;
+        fs::write(&target, &shot.png)?;
+        // The picture's middle and size, in the game's units, then in metres.
+        let (cx, cy) = ((w / 2.0 - bx) / ax, (h / 2.0 - by) / ay);
+        let (gw, gh) = (w / ax.abs(), h / ay.abs());
+        let r = |v: f64| ((v / ppu as f64) * 1000.0).round() as f32 / 1000.0;
+        let mut e = Entity::new(&unique("screen"), "Game screen (backdrop)");
+        e.transform.position = [r(cx), -r(cy) + 0.0, -0.5];
+        e.parts.push(Part::Sprite { asset, frame: None, size: Some([r(gw), r(gh)]), flip_x: ax < 0.0, frames: Vec::new(), fps: None });
+        e.tags.push("no-collide".into());
+        entities.insert(0, e);
     }
     let scene = Scene {
         format: FORMAT,
@@ -953,7 +1080,7 @@ pub fn capture(dir: &Path, positions: &[(String, f64, f64)], ppu: f32, snapshot:
         entities,
     };
     project::save_scene(dir, &scene, &format!("Capture {name} from the running game"))?;
-    Ok(Captured { scene: id, objects: positions.len(), matched, backdrop })
+    Ok(Captured { scene: id, name, objects: kept, skipped, matched, backdrop: backdrop.into(), calibration: found })
 }
 
 // ---------------------------------------------------------------------------
@@ -1213,7 +1340,7 @@ mod tests {
         assert_eq!(capture(&out, &positions, 100.0, None).unwrap().scene, "captured-2");
         // With the screen: a backdrop behind the objects, lined up by the calibration
         // (screen = 2 * game + 10): a 400 x 200 picture covers game x -5..195, y -5..95.
-        let shot = Snapshot { png: png(400, 200), calibration: Some([2.0, 10.0, 2.0, 10.0]) };
+        let shot = Snapshot { png: real_png(400, 200), calibration: Some([2.0, 10.0, 2.0, 10.0]) };
         let c = capture(&out, &positions, 100.0, Some(&shot)).unwrap();
         assert_eq!(c.backdrop, "aligned");
         let scene = project::load_scene(&out, &c.scene).unwrap();
@@ -1222,6 +1349,47 @@ mod tests {
         assert!(matches!(&back.parts[0], Part::Sprite { size: Some([w, h]), .. } if (*w - 2.0).abs() < 1e-6 && (*h - 1.0).abs() < 1e-6));
         assert!(out.join("assets").join(format!("textures/captured/captured/{}.png", c.scene)).is_file());
         assert_eq!(project::load_scene(&out, "captured-2").unwrap().name, "Captured level 2");
+    }
+
+    /// A whole (grey) PNG, readable by the decoder.
+    fn real_png(w: u32, h: u32) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut enc = png::Encoder::new(&mut out, w, h);
+        enc.set_color(png::ColorType::Rgb);
+        enc.set_depth(png::BitDepth::Eight);
+        enc.write_header().unwrap().write_image_data(&vec![90u8; (w * h * 3) as usize]).unwrap();
+        out
+    }
+
+    #[test]
+    fn captures_leave_out_what_is_not_on_screen() {
+        let mut groups = BTreeMap::new();
+        // The game's grid data: many objects crowded into a corner.
+        groups.insert("com.g.door".to_string(), (0..50).map(|i| ((i % 10) as f64, (i / 10) as f64)).collect::<Vec<_>>());
+        groups.insert("com.g.map".to_string(), vec![(5.0, 5.0)]);
+        // Not placed yet.
+        groups.insert("com.g.mouse".to_string(), vec![(0.0, 0.0), (0.0, 0.0)]);
+        groups.insert("com.g.jonny".to_string(), vec![(358.0, 119.0)]);
+        groups.insert("com.g.torch".to_string(), vec![(40.0, 360.0), (520.0, 40.0), (5000.0, 40.0)]);
+        let (kept, skipped) = on_screen(groups.clone(), None);
+        assert_eq!(kept.keys().map(|k| k.as_str()).collect::<Vec<_>>(), ["com.g.jonny", "com.g.torch"]);
+        assert_eq!(skipped, 53);
+        // With the screen known, the torch far off it goes too.
+        let (kept, skipped) = on_screen(groups, Some(([1.0, 0.0, 1.0, 0.0], 720.0, 1280.0)));
+        assert_eq!(kept["com.g.torch"].len(), 2);
+        assert_eq!(skipped, 54);
+    }
+
+    #[test]
+    fn class_names_find_their_things() {
+        let thing = |id: &str| Thing { tags: Vec::new(), format: FORMAT, id: id.into(), name: id.into(), kind: ThingKind::Prop, role: None, description: None, properties: Vec::new(), parts: Vec::new(), behaviors: Vec::new(), children: Vec::new() };
+        let things = vec![thing("lamp"), thing("door-lever"), thing("franky"), thing("zombie")];
+        let id = |c: &str| thing_for_class(c, &things).map(|t| t.id.clone());
+        assert_eq!(id("com.g.lampItemInfo").as_deref(), Some("lamp"));
+        assert_eq!(id("com.g.doorLeverDecorationInfo").as_deref(), Some("door-lever"));
+        assert_eq!(id("com.g.frankyGuarding").as_deref(), Some("franky"));
+        assert_eq!(id("com.g.ZombieEnemy").as_deref(), Some("zombie"));
+        assert_eq!(id("com.g.timerEvent"), None);
     }
 
     /// The smallest PNG header imagesize reads.
@@ -1251,5 +1419,35 @@ mod real {
             let thing = project::load_thing(&out, &t.id).unwrap();
             println!("  {:?} {} ({:?}) {}", thing.kind, thing.name, thing.role, thing.description.unwrap_or_default());
         }
+    }
+}
+
+#[cfg(test)]
+mod real_capture {
+    use super::*;
+
+    /// A real capture: `GX_LAYER=<layer> GX_SCENE=captured-3 cargo test -- --ignored real_capture --nocapture`.
+    #[test]
+    #[ignore]
+    fn real_capture_calibrates() {
+        let dir = PathBuf::from(std::env::var("GX_LAYER").unwrap());
+        let id = std::env::var("GX_SCENE").unwrap();
+        let scene = project::load_scene(&dir, &id).unwrap();
+        let mut groups: BTreeMap<String, Vec<(f64, f64)>> = BTreeMap::new();
+        for g in &scene.entities {
+            for e in &g.children {
+                let class = e.parts.iter().find_map(|p| if let Part::Custom { values, .. } = p { values.get("class").map(|v| if let Value::Text(t) = v { t.clone() } else { String::new() }) } else { None });
+                if let Some(c) = class {
+                    groups.entry(c).or_default().push((e.transform.position[0] as f64 * 100.0, -e.transform.position[1] as f64 * 100.0));
+                }
+            }
+        }
+        let things: Vec<Thing> = project::open(&dir).unwrap().things.iter().filter_map(|t| project::load_thing(&dir, &t.id).ok()).collect();
+        let png = fs::read(dir.join("assets/textures").join(project::open(&dir).unwrap().info.sources[0].id.clone()).join("captured").join(format!("{id}.png"))).unwrap();
+        let screen = super::super::calibrate::decode_png(&png).unwrap();
+        let (rough, skipped) = on_screen(groups, None);
+        println!("kept classes {:?}, skipped {skipped}", rough.keys().collect::<Vec<_>>());
+        let started = std::time::Instant::now();
+        println!("calibration {:?} in {:?}", auto_calibrate(&dir, &rough, &things, &screen), started.elapsed());
     }
 }

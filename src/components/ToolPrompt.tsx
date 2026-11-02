@@ -3,6 +3,8 @@ import { useEffect, useState } from "react";
 import { api } from "../lib/api";
 import type { ToolInfo, ToolProgress } from "../lib/types";
 import { ProgressBar, installTool } from "./ToolsPanel";
+import { errorText } from "../lib/errors";
+import ErrorText from "./ErrorText";
 
 interface Props {
   /** Tool ids that are missing. */
@@ -40,7 +42,7 @@ export default function ToolPrompt({ missing, action, without, onReady, onSkip, 
         await installTool(tool.id, setProgress);
         setDone((d) => new Set(d).add(tool.id));
       } catch (e) {
-        setError(`${tool.name}: ${e}`);
+        setError(`${tool.name}: ${errorText(e)}`);
         setCurrent(null);
         return;
       }
@@ -74,7 +76,7 @@ export default function ToolPrompt({ missing, action, without, onReady, onSkip, 
             </li>
           ))}
         </ul>
-        {error && <div className="panel error small">{error}</div>}
+        {error && <div className="panel error small"><ErrorText text={error} /></div>}
         <p className="muted tiny">
           Downloaded from each tool's official release into GameX's tools folder. You can manage them later under Settings
           → Tools.

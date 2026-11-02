@@ -14,7 +14,7 @@ use crate::model::{Category, GameProject, ImportProgress, ImportRecord};
 use crate::preview::{self, Preview};
 use crate::rebuild::{self, BuildInfo, BuildOptions, BuildResult};
 use crate::settings::Settings;
-use crate::tools::{self, Tool, ToolStatus};
+use crate::tools::{self, Tool};
 use crate::workspace::Workspace;
 
 pub struct AppState {
@@ -25,6 +25,11 @@ pub struct AppState {
     lives: LiveSessions,
     /// Screen mirrors of running games, by project id.
     mirrors: Mutex<std::collections::HashMap<String, crate::mirror::Mirror>>,
+    /// Draw recordings of running games, by project id (lock after `lives`).
+    recs: Recordings,
+    /// When the user last pressed something in each game (kept apart from
+    /// `recs` so a tap never waits for a recorder tick).
+    inputs: std::sync::Arc<Mutex<std::collections::HashMap<String, std::time::Instant>>>,
     workspace_root: PathBuf,
     signing_dir: PathBuf,
     settings_path: PathBuf,
@@ -40,6 +45,8 @@ impl AppState {
             runs: Mutex::new(std::collections::HashMap::new()),
             lives: Default::default(),
             mirrors: Mutex::new(std::collections::HashMap::new()),
+            recs: Default::default(),
+            inputs: Default::default(),
             signing_dir: {
                 crate::toolbox::set_tools_dir(data_dir.join("tools"));
                 data_dir.join("signing")
@@ -104,7 +111,7 @@ pub async fn import_game(
     .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_projects(state: State<'_, AppState>) -> Result<Vec<ImportRecord>, String> {
     state.workspace().list().map_err(|e| e.to_string())
 }
@@ -112,17 +119,9 @@ pub fn list_projects(state: State<'_, AppState>) -> Result<Vec<ImportRecord>, St
 /// Deletes an imported project and its workspace folder (original copy,
 /// unpacked files, edits and history). The source file the user imported
 /// from is not touched.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_project(state: State<'_, AppState>, id: String) -> Result<(), String> {
     state.workspace().delete_project(&id).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub fn get_project(state: State<'_, AppState>, id: String) -> Result<ImportRecord, String> {
-    state
-        .workspace()
-        .load_record(&id)
-        .map_err(|e| e.to_string())
 }
 
 /// The project's categorized content. Runs the analyzer the first time (or
@@ -144,7 +143,7 @@ pub async fn get_analysis(
 
 /// Moves an object to another category by hand; `None` restores the
 /// analyzer's choice.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_category(
     state: State<'_, AppState>,
     id: String,
@@ -179,18 +178,18 @@ pub async fn read_preview(
 }
 
 /// The whole text of a file (its edited version if any), for the editor.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn read_text_file(state: State<'_, AppState>, id: String, path: String) -> Result<String, String> {
     let dir = state.workspace().project_dir(&id).map_err(|e| e.to_string())?;
     preview::read_text(&dir, &path).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_edit_state(state: State<'_, AppState>, id: String) -> Result<EditState, String> {
     edit_and_report(&state, &id, |_| Ok(()))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn save_text_file(
     state: State<'_, AppState>,
     id: String,
@@ -200,8 +199,28 @@ pub fn save_text_file(
     edit_and_report(&state, &id, |s| s.save_text(&path, &text))
 }
 
+/// The starting values of gameplay fields, each `(smali file, field)`, as the
+/// game's code now has them (None where GameX can't find the number).
+#[tauri::command(async)]
+pub fn gameplay_now(state: State<'_, AppState>, id: String, items: Vec<(String, String)>) -> Result<Vec<Option<String>>, String> {
+    let dir = state.workspace().project_dir(&id).map_err(|e| e.to_string())?;
+    Ok(items
+        .iter()
+        .map(|(file, field)| preview::read_text(&dir, file).ok().and_then(|text| crate::tuning::value_of(&text, field)))
+        .collect())
+}
+
+/// Changes a gameplay field's starting value in the game's code (one undo step).
+#[tauri::command(async)]
+pub fn set_gameplay_value(state: State<'_, AppState>, id: String, path: String, field: String, value: String) -> Result<EditState, String> {
+    let dir = state.workspace().project_dir(&id).map_err(|e| e.to_string())?;
+    let text = preview::read_text(&dir, &path).map_err(|e| e.to_string())?;
+    let changed = crate::tuning::set_value(&text, &field, &value).map_err(|e| e.to_string())?;
+    edit_and_report(&state, &id, |s| s.save_text_as(&path, &changed, format!("Set {field} to {value}")))
+}
+
 /// Replaces a file with one the user picked (`source` is a path on disk).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn replace_file(
     state: State<'_, AppState>,
     id: String,
@@ -211,18 +230,18 @@ pub fn replace_file(
     edit_and_report(&state, &id, |s| s.replace(&path, std::path::Path::new(&source)))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn revert_file(state: State<'_, AppState>, id: String, path: String) -> Result<EditState, String> {
     edit_and_report(&state, &id, |s| s.revert(&path))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn undo_edit(state: State<'_, AppState>, id: String) -> Result<EditState, String> {
     edit_and_report(&state, &id, |s| s.undo().map(|_| ()))
 }
 
 /// A game file's bytes (the edited version if there is one), for the 3D viewer.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn read_bytes(state: State<'_, AppState>, id: String, path: String) -> Result<tauri::ipc::Response, String> {
     let dir = state.workspace().project_dir(&id).map_err(|e| e.to_string())?;
     let real = preview::resolve(&dir, &path).map_err(|e| e.to_string())?;
@@ -238,7 +257,7 @@ fn read_limited(path: &std::path::Path) -> Result<tauri::ipc::Response, String> 
 }
 
 /// Materials and textures next to a game's model, as paths in the project.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn model_aux(state: State<'_, AppState>, id: String, path: String) -> Result<Vec<String>, String> {
     let dir = state.workspace().project_dir(&id).map_err(|e| e.to_string())?;
     preview::resolve(&dir, &path).map_err(|e| e.to_string())?;
@@ -253,12 +272,12 @@ pub fn model_aux(state: State<'_, AppState>, id: String, path: String) -> Result
 }
 
 /// A model the user picked to replace one with, and the files next to it.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn read_local_bytes(path: String) -> Result<tauri::ipc::Response, String> {
     read_limited(std::path::Path::new(&path))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn local_model_aux(path: String) -> Result<Vec<String>, String> {
     let folder = std::path::Path::new(&path).parent().ok_or("Invalid file path.")?;
     Ok(crate::models::aux_files(folder).iter().map(|p| p.to_string_lossy().into_owned()).collect())
@@ -267,7 +286,7 @@ pub fn local_model_aux(path: String) -> Result<Vec<String>, String> {
 /// Saves new bytes for a game file (a converted model). The bytes are the
 /// request body; the project, path and history label come in headers
 /// (`%`-escaped), since a JSON array of bytes would be slow.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn save_file_bytes(state: State<'_, AppState>, request: tauri::ipc::Request<'_>) -> Result<EditState, String> {
     let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
         return Err("Expected the file's bytes.".into());
@@ -281,7 +300,7 @@ pub fn save_file_bytes(state: State<'_, AppState>, request: tauri::ipc::Request<
 }
 
 /// Writes bytes to a file the user picked in a save dialog (an exported model).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn save_local_bytes(request: tauri::ipc::Request<'_>) -> Result<(), String> {
     let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
         return Err("Expected the file's bytes.".into());
@@ -316,7 +335,7 @@ pub async fn game_identities(state: State<'_, AppState>, ids: Vec<String>) -> Re
 }
 
 /// Current name, package, version, icon and permissions for the build dialog.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_build_info(state: State<'_, AppState>, id: String) -> Result<BuildInfo, String> {
     let workspace = state.workspace();
     let record = workspace.load_record(&id).map_err(|e| e.to_string())?;
@@ -350,7 +369,7 @@ pub async fn build_apk(
 }
 
 /// A PNG the user picked, as a data URL, to preview a new icon.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn read_png(path: String) -> Result<String, String> {
     use base64::Engine;
     let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
@@ -453,7 +472,7 @@ pub async fn get_references(
 }
 
 /// A Godot text scene's nodes, properties and resources.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn scene_load(state: State<'_, AppState>, id: String, path: String) -> Result<crate::scene::Scene, String> {
     let project = state.workspace().project_dir(&id).map_err(|e| e.to_string())?;
     let text = preview::read_text(&project, &path).map_err(|e| e.to_string())?;
@@ -461,7 +480,7 @@ pub fn scene_load(state: State<'_, AppState>, id: String, path: String) -> Resul
 }
 
 /// Sets properties of one node and saves them as one undoable edit.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn scene_set(
     state: State<'_, AppState>,
     id: String,
@@ -478,7 +497,7 @@ pub fn scene_set(
 }
 
 /// Exports a ZIP or folder import with the edits applied.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn export_files(state: State<'_, AppState>, id: String, dest: String) -> Result<usize, String> {
     state.edits(&id)?.export_files(std::path::Path::new(&dest)).map_err(|e| e.to_string())
 }
@@ -494,7 +513,7 @@ pub async fn scan_media(state: State<'_, AppState>, id: String, path: String) ->
 }
 
 /// One embedded item as a data URL, for previews and playback.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn read_media_item(
     state: State<'_, AppState>,
     id: String,
@@ -510,7 +529,7 @@ pub fn read_media_item(
 }
 
 /// Saves one embedded item to a file the user chose.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn save_media_item(
     state: State<'_, AppState>,
     id: String,
@@ -589,7 +608,7 @@ fn last_build(project: &std::path::Path) -> Option<RunApk> {
 }
 
 /// The APKs a project can run: the original, and the last build if any.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn run_options(state: State<'_, AppState>, id: String) -> Result<RunOptions, String> {
     let project = state.workspace().project_dir(&id).map_err(|e| e.to_string())?;
     let original = original_apk(&project).and_then(|p| {
@@ -713,6 +732,7 @@ pub fn mirror_stop(state: State<'_, AppState>, id: String) {
 /// and end are the same, else a swipe; `millis` is how long it was held.
 #[tauri::command]
 pub fn mirror_touch(state: State<'_, AppState>, id: String, x1: u32, y1: u32, x2: u32, y2: u32, millis: u32) -> Result<(), String> {
+    note_input(&state, &id);
     let mirrors = state.mirrors.lock().unwrap();
     let m = mirrors.get(&id).ok_or("The screen isn't being shown.")?;
     m.input(&crate::mirror::touch_command(x1, y1, x2, y2, millis))
@@ -721,9 +741,11 @@ pub fn mirror_touch(state: State<'_, AppState>, id: String, x1: u32, y1: u32, x2
 /// Android keys: 4 = Back, 3 = Home.
 #[tauri::command]
 pub fn mirror_key(state: State<'_, AppState>, id: String, code: u32) -> Result<(), String> {
-    if !matches!(code, 3 | 4 | 82 | 187) {
+    // Home, Back, Menu, Recents, the D-pad and its centre, Space, Enter.
+    if !matches!(code, 3 | 4 | 82 | 187 | 19..=23 | 62 | 66) {
         return Err("That key isn't supported.".into());
     }
+    note_input(&state, &id);
     let mirrors = state.mirrors.lock().unwrap();
     let m = mirrors.get(&id).ok_or("The screen isn't being shown.")?;
     m.input(&format!("input keyevent {code}"))
@@ -793,6 +815,7 @@ pub async fn live_attach(state: State<'_, AppState>, id: String) -> Result<LiveI
 
 #[tauri::command]
 pub fn live_detach(state: State<'_, AppState>, id: String) {
+    state.recs.lock().unwrap().remove(&id);
     if let Some((mut s, port)) = state.lives.lock().unwrap().remove(&id) {
         s.detach();
         crate::device::unforward(&s.target, port);
@@ -951,9 +974,161 @@ pub async fn ui_pick(state: State<'_, AppState>, id: String, x: i32, y: i32) -> 
 }
 
 // ---------------------------------------------------------------------------
+// Redrawing the running game from its draw calls
+
+type Recordings = std::sync::Arc<Mutex<std::collections::HashMap<String, crate::drawrec::level::Session>>>;
+
+/// The user pressed something in the game: the object that answers is the player.
+fn note_input(state: &AppState, id: &str) {
+    state.inputs.lock().unwrap().insert(id.to_string(), std::time::Instant::now());
+}
+
+/// Builds a recording copy of the game: the user's edits plus GameX's draw
+/// recorder, same name and package, saved as the project's last build so Run
+/// can install it.
+#[tauri::command]
+pub async fn rec_build(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<BuildResult, String> {
+    let workspace = state.workspace();
+    let record = workspace.load_record(&id).map_err(|e| e.to_string())?;
+    let dir = workspace.project_dir(&id).map_err(|e| e.to_string())?;
+    let settings = state.settings();
+    let signing_dir = state.signing_dir.clone();
+    let info = rebuild::build_info(&dir, &record, &settings, &signing_dir);
+    if let Some(problem) = info.problems.first() {
+        return Err(problem.clone());
+    }
+    let options = BuildOptions {
+        app_name: if info.app_name.trim().is_empty() { record.name.clone() } else { info.app_name },
+        package: info.package,
+        version_name: if info.version_name.trim().is_empty() { "1.0".into() } else { info.version_name },
+        version_code: info.version_code.max(1),
+        icon_path: None,
+        removed_permissions: Vec::new(),
+        output_path: dir.join("build").join("gamex-recording.apk").display().to_string(),
+        recorder: true,
+    };
+    std::fs::create_dir_all(dir.join("build")).map_err(|e| e.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = rebuild::build(&dir, &settings, &signing_dir, &options, |stage, message| {
+            let _ = app.emit("build-progress", ImportProgress { stage: stage.into(), message: message.into() });
+        })?;
+        if result.recorder.is_some_and(|r| r.draws == 0) {
+            return Err("This game doesn't draw with Android's Canvas (it likely uses OpenGL), so its draw calls can't be recorded. Its engine's reader (Editor) is the way to edit its levels.".into());
+        }
+        Ok(result)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// One look at the running game through the recorder: every sprite on screen
+/// with its box and what it is, the player, and (when `explore` is on) the
+/// level put together so far.
+#[tauri::command]
+pub async fn rec_tick(
+    state: State<'_, AppState>,
+    id: String,
+    classes: Vec<String>,
+    explore: bool,
+    // Starts the level over (Record level pressed again).
+    restart: bool,
+) -> Result<crate::drawrec::level::View, String> {
+    let lives = state.lives.clone();
+    let recs = state.recs.clone();
+    let input = state.inputs.lock().unwrap().get(&id).copied();
+    tauri::async_runtime::spawn_blocking(move || {
+        with_live(&lives, &id, |live| {
+            let mut recs = recs.lock().unwrap();
+            let session = recs.entry(id.clone()).or_default();
+            session.last_input = input;
+            if restart {
+                session.level = None;
+            }
+            session.tick(live, &classes, explore).map_err(|e| e.to_string())
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Stops time in the game (every thread of it), or starts it again. Without a
+/// debug connection the game's process itself is stopped through adb.
+#[tauri::command]
+pub async fn rec_pause(state: State<'_, AppState>, id: String, paused: bool) -> Result<bool, String> {
+    let lives = state.lives.clone();
+    let recs = state.recs.clone();
+    let launched = state.runs.lock().unwrap().get(&id).cloned();
+    tauri::async_runtime::spawn_blocking(move || {
+        let connected = lives.lock().unwrap().contains_key(&id);
+        if connected {
+            with_live(&lives, &id, |live| {
+                let mut recs = recs.lock().unwrap();
+                let session = recs.entry(id.clone()).or_default();
+                if session.paused != paused {
+                    if paused { live.suspend() } else { live.resume() }.map_err(|e| e.to_string())?;
+                    session.paused = paused;
+                }
+                Ok(paused)
+            })
+        } else {
+            let launched = launched.ok_or("Start the game with Run first.")?;
+            crate::device::freeze(&launched.target, &launched.package, paused)?;
+            Ok(paused)
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Moves one of the game's objects by (dx, dy) screen pixels (dragged while paused).
+#[tauri::command]
+pub async fn rec_move(state: State<'_, AppState>, id: String, object: String, dx: f64, dy: f64) -> Result<(), String> {
+    let lives = state.lives.clone();
+    let recs = state.recs.clone();
+    let oid: u64 = object.parse().map_err(|_| "Invalid object.")?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let (mapping, at) = {
+            let recs = recs.lock().unwrap();
+            let s = recs.get(&id).ok_or("Nothing recorded yet.")?;
+            let mapping = s.mapping.ok_or("GameX hasn't matched the sprites to the game's objects yet.")?;
+            let at = s.links.iter().find(|(o, _)| o.id == object).map(|(o, _)| (o.x, o.y)).ok_or("That object isn't on screen.")?;
+            (mapping, at)
+        };
+        let (gx, gy) = (at.0 + dx / mapping.sx, at.1 + dy / mapping.sy);
+        with_live(&lives, &id, |live| live.move_object(oid, gx, gy))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Saves the level explored so far in the game's layer, as a new scene.
+/// `kinds`: each class's category ("characters", "items"...).
+#[tauri::command]
+pub async fn rec_save(
+    state: State<'_, AppState>,
+    id: String,
+    layer: String,
+    kinds: std::collections::HashMap<String, String>,
+) -> Result<crate::drawrec::level::Saved, String> {
+    let recs = state.recs.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let recs = recs.lock().unwrap();
+        let session = recs.get(&id).ok_or("Nothing recorded yet.")?;
+        let level = session
+            .level
+            .as_ref()
+            .filter(|l| l.frames > 0)
+            .ok_or("Nothing explored yet: turn on Record level and play for a while.")?;
+        crate::drawrec::level::save(std::path::Path::new(&layer), level, &session.sprites, &kinds).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+// ---------------------------------------------------------------------------
 // Optional tools (Settings → Tools)
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn tools_catalog(state: State<'_, AppState>) -> Vec<crate::toolbox::ToolInfo> {
     let settings = state.settings();
     let mut catalog = crate::toolbox::catalog();
@@ -1019,7 +1194,7 @@ pub async fn tool_install(app: AppHandle, id: String) -> Result<crate::toolbox::
 
 /// Which of these tools can't be found anywhere (a Settings path, GameX's
 /// own copy, PATH or JAVA_HOME), so the UI can offer to install them.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn tools_missing(state: State<'_, AppState>, ids: Vec<String>) -> Vec<String> {
     let settings = state.settings();
     ids.into_iter()
@@ -1036,7 +1211,7 @@ pub fn tools_missing(state: State<'_, AppState>, ids: Vec<String>) -> Vec<String
         .collect()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn tool_uninstall(id: String) -> Result<(), String> {
     crate::toolbox::uninstall(&id)
 }
@@ -1053,13 +1228,4 @@ pub fn save_settings(state: State<'_, AppState>, settings: Settings) -> Result<(
         .map_err(|e| e.to_string())?;
     *state.settings.lock().unwrap() = settings;
     Ok(())
-}
-
-#[tauri::command]
-pub fn tool_status(state: State<'_, AppState>) -> Vec<ToolStatus> {
-    let settings = state.settings();
-    [Tool::Apktool, Tool::Jadx, Tool::Signer]
-        .into_iter()
-        .map(|t| tools::status(t, &settings))
-        .collect()
 }

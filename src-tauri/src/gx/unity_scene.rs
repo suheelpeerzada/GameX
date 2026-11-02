@@ -14,11 +14,14 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use walkdir::WalkDir;
 
 use super::glb;
-use super::godot::{guess_kind, Report};
+use super::godot::Report;
+use super::roles;
+use super::solid;
 use super::model::*;
 use super::project::{self, write_json};
 use crate::unity::{DataFile, Mesh, Reader, SerializedFile};
@@ -37,6 +40,8 @@ const CIRCLE_COLLIDER_2D: i32 = 58;
 const POLYGON_COLLIDER_2D: i32 = 60;
 const BOX_COLLIDER_2D: i32 = 61;
 const MESH_COLLIDER: i32 = 64;
+/// A mesh collider wider than this (metres) on two sides could be stood in: it becomes walls and floors.
+const HOLLOW: f32 = 2.5;
 const BOX_COLLIDER: i32 = 65;
 const COMPOSITE_COLLIDER_2D: i32 = 66;
 const EDGE_COLLIDER_2D: i32 = 68;
@@ -44,6 +49,7 @@ const CAPSULE_COLLIDER_2D: i32 = 70;
 const AUDIO_SOURCE: i32 = 82;
 const AUDIO_CLIP: i32 = 83;
 const ANIMATOR: i32 = 95;
+const NAV_MESH_AGENT: i32 = 195;
 const LIGHT: i32 = 108;
 const MONO_BEHAVIOUR: i32 = 114;
 const MONO_SCRIPT: i32 = 115;
@@ -343,19 +349,118 @@ fn read_material(g: &Game, r: Ref) -> ([f32; 4], Option<Ref>) {
 
 /// A renderer's materials: the list of references that all point at materials.
 fn renderer_materials(g: &Game, r: Ref) -> Vec<Ref> {
-    let Some(d) = g.bytes(r) else { return Vec::new() };
+    g.bytes(r).and_then(|d| materials_in(g, r, &d)).map(|(list, _)| list).unwrap_or_default()
+}
+
+/// The materials list in a renderer's bytes, and where the bytes after it start.
+fn materials_in(g: &Game, r: Ref, d: &[u8]) -> Option<(Vec<Ref>, usize)> {
     let little = g.little(r.0);
     for at in (12..d.len().saturating_sub(16)).step_by(4) {
-        let n = i32_at(&d, at, little).unwrap_or(0);
+        let n = i32_at(d, at, little).unwrap_or(0);
         if !(1..=32).contains(&n) || at + 4 + n as usize * 12 > d.len() {
             continue;
         }
-        let list: Vec<Option<Ref>> = (0..n as usize).map(|i| g.pptr_at(r.0, &d, at + 4 + i * 12)).collect();
+        let list: Vec<Option<Ref>> = (0..n as usize).map(|i| g.pptr_at(r.0, d, at + 4 + i * 12)).collect();
         if list.iter().all(|m| m.is_some_and(|m| g.class(m) == Some(MATERIAL))) {
-            return list.into_iter().flatten().collect();
+            return Some((list.into_iter().flatten().collect(), at + 4 + n as usize * 12));
         }
     }
-    Vec::new()
+    None
+}
+
+/// Static batching: a built game merges still objects into one "Combined
+/// Mesh" per scene, already placed in the world (or under the batch root),
+/// and each renderer draws only its own sub-meshes of it. Returns (first
+/// sub-mesh, how many, batch root), from the fields right after the materials.
+fn static_batch(g: &Game, r: Ref) -> Option<Batch> {
+    let d = g.bytes(r)?;
+    let little = g.little(r.0);
+    let (_, end) = materials_in(g, r, &d)?;
+    let u16_at = |at: usize| d.get(at..at + 2).map(|b| if little { u16::from_le_bytes([b[0], b[1]]) } else { u16::from_be_bytes([b[0], b[1]]) } as usize);
+    let (first, count, root_at) = if g.version >= (5, 5) {
+        (u16_at(end)?, u16_at(end + 2)?, end + 4)
+    } else {
+        // Older builds list the sub-mesh indices (always a run).
+        let n = i32_at(&d, end, little).filter(|n| (0..=64).contains(n))? as usize;
+        (if n > 0 { i32_at(&d, end + 4, little)?.max(0) as usize } else { 0 }, n, end + 4 + n * 4)
+    };
+    let root = g.pptr_at(r.0, &d, root_at).filter(|t| matches!(g.class(*t), Some(TRANSFORM | RECT_TRANSFORM)));
+    (count > 0).then_some((first, count, root))
+}
+
+/// A 4x4 matrix (rows), in Unity's axes.
+type Mat = [[f32; 4]; 4];
+
+const IDENTITY: Mat = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
+
+fn mat_mul(a: &Mat, b: &Mat) -> Mat {
+    let mut m = [[0.0; 4]; 4];
+    for (i, row) in m.iter_mut().enumerate() {
+        for (j, v) in row.iter_mut().enumerate() {
+            *v = (0..4).map(|k| a[i][k] * b[k][j]).sum();
+        }
+    }
+    m
+}
+
+/// Position, rotation, scale -> matrix.
+fn trs(tf: &Tf) -> Mat {
+    let [x, y, z, w] = tf.rotation;
+    let len = (x * x + y * y + z * z + w * w).sqrt();
+    let [x, y, z, w] = if len > 0.5 { [x / len, y / len, z / len, w / len] } else { [0.0, 0.0, 0.0, 1.0] };
+    let r = [
+        [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)],
+        [2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)],
+        [2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y)],
+    ];
+    let s = tf.scale;
+    let p = tf.position;
+    [
+        [r[0][0] * s[0], r[0][1] * s[1], r[0][2] * s[2], p[0]],
+        [r[1][0] * s[0], r[1][1] * s[1], r[1][2] * s[2], p[1]],
+        [r[2][0] * s[0], r[2][1] * s[1], r[2][2] * s[2], p[2]],
+        [0.0, 0.0, 0.0, 1.0],
+    ]
+}
+
+/// An affine matrix's inverse (none if it squashes space flat).
+fn mat_inv(m: &Mat) -> Option<Mat> {
+    let a = |i: usize, j: usize| m[i][j];
+    let det = a(0, 0) * (a(1, 1) * a(2, 2) - a(1, 2) * a(2, 1)) - a(0, 1) * (a(1, 0) * a(2, 2) - a(1, 2) * a(2, 0)) + a(0, 2) * (a(1, 0) * a(2, 1) - a(1, 1) * a(2, 0));
+    if det.abs() < 1e-12 {
+        return None;
+    }
+    // The 3x3 inverse is the cofactors' transpose over the determinant.
+    let c = |i: usize, j: usize| {
+        let (r0, r1) = ((i + 1) % 3, (i + 2) % 3);
+        let (c0, c1) = ((j + 1) % 3, (j + 2) % 3);
+        a(r0, c0) * a(r1, c1) - a(r0, c1) * a(r1, c0)
+    };
+    let mut r = [[0.0; 4]; 4];
+    for (i, row) in r.iter_mut().take(3).enumerate() {
+        for (j, v) in row.iter_mut().take(3).enumerate() {
+            *v = c(j, i) / det;
+        }
+        row[3] = -(0..3).map(|k| row[k] * m[k][3]).sum::<f32>();
+    }
+    r[3][3] = 1.0;
+    Some(r)
+}
+
+fn mat_point(m: &Mat, p: [f32; 3]) -> [f32; 3] {
+    [0, 1, 2].map(|i| m[i][0] * p[0] + m[i][1] * p[1] + m[i][2] * p[2] + m[i][3])
+}
+
+/// A Transform's place in the world, parents included.
+fn world_of(g: &Game, r: Ref) -> Mat {
+    let mut m = IDENTITY;
+    let mut at = Some(r);
+    for _ in 0..128 {
+        let Some(tf) = at.and_then(|r| read_transform(g, r)) else { break };
+        m = mat_mul(&trs(&tf), &m);
+        at = tf.father;
+    }
+    m
 }
 
 struct SpriteInfo {
@@ -460,6 +565,10 @@ struct Ctx<'a> {
     origin: BTreeMap<String, Origin>,
     /// Object -> GameX asset path, for images, sounds and models already written.
     assets: HashMap<(Ref, Vec<Ref>), String>,
+    /// Meshes read so far (None: unreadable).
+    meshes: HashMap<Ref, Option<Rc<Decoded>>>,
+    /// Models cut from static batches, by mesh and content.
+    same_models: HashMap<(Ref, u64), String>,
     scripts: HashSet<String>,
     /// Entity IDs used in the scene being read.
     taken: HashSet<String>,
@@ -515,17 +624,29 @@ impl Ctx<'_> {
         Some(asset)
     }
 
-    fn read_mesh(&self, r: Ref) -> Option<Mesh> {
-        let d = self.g.bytes(r)?;
-        let mut mesh = Mesh::read(&d, self.g.little(r.0), self.g.version).ok()?;
-        if mesh.vertex_data.is_empty() {
-            if let Some((offset, size, path)) = &mesh.stream {
-                let name = path.rsplit('/').next().unwrap_or(path);
-                let stream = DataFile::open(&self.g.dir.join(name)).ok()?;
-                mesh.vertex_data = stream.read_at(*offset, *size as usize).ok()?;
-            }
+    /// A mesh, decoded once per translation (static batches share one big mesh).
+    fn read_mesh(&mut self, r: Ref) -> Option<Rc<Decoded>> {
+        if let Some(m) = self.meshes.get(&r) {
+            return m.clone();
         }
-        Some(mesh)
+        let read = || {
+            let d = self.g.bytes(r)?;
+            let mut mesh = Mesh::read(&d, self.g.little(r.0), self.g.version).ok()?;
+            if mesh.vertex_data.is_empty() {
+                if let Some((offset, size, path)) = &mesh.stream {
+                    let name = path.rsplit('/').next().unwrap_or(path);
+                    let stream = DataFile::open(&self.g.dir.join(name)).ok()?;
+                    mesh.vertex_data = stream.read_at(*offset, *size as usize).ok()?;
+                }
+            }
+            let pos = mesh.channel(0).filter(|(_, d)| *d >= 3);
+            let normals = mesh.channel(1).filter(|(_, d)| *d >= 3);
+            let uvs = mesh.channel(4).filter(|(_, d)| *d >= 2);
+            Some(Rc::new(Decoded { mesh, pos, normals, uvs }))
+        };
+        let decoded = read();
+        self.meshes.insert(r, decoded.clone());
+        decoded
     }
 
     /// A mesh with its materials as a GLB model in the project (once per combination).
@@ -534,29 +655,55 @@ impl Ctx<'_> {
         if let Some(a) = self.assets.get(&key) {
             return Some(a.clone());
         }
-        let mesh = self.read_mesh(mesh_ref)?;
-        if mesh.compressed {
+        let m = self.read_mesh(mesh_ref)?;
+        if m.mesh.compressed {
             *self.report.untranslated.entry("compressed meshes".into()).or_default() += 1;
             return None;
         }
-        let (pos, dim) = mesh.channel(0).filter(|(_, d)| *d >= 3)?;
-        let normals = mesh.channel(1).filter(|(_, d)| *d >= 3);
-        let uvs = mesh.channel(4).filter(|(_, d)| *d >= 2);
+        let geometry = Geometry::of(&m, 0..m.mesh.sub_meshes.len(), None)?;
         let file = safe_name(self.file_name(mesh_ref));
-        let asset = format!("models/{}/{file}/{}-{}.glb", self.source, mesh_ref.1, safe_name(&mesh.name));
-        let n = mesh.vertex_count as usize;
-        let positions: Vec<[f32; 3]> = (0..n).map(|v| [-pos[v * dim], pos[v * dim + 1], pos[v * dim + 2]]).collect();
-        let normals: Vec<[f32; 3]> = normals.map(|(nv, d)| (0..n).map(|v| [-nv[v * d], nv[v * d + 1], nv[v * d + 2]]).collect()).unwrap_or_default();
-        let uvs: Vec<[f32; 2]> = uvs.map(|(uv, d)| (0..n).map(|v| [uv[v * d], 1.0 - uv[v * d + 1]]).collect()).unwrap_or_default();
+        let asset = format!("models/{}/{file}/{}-{}.glb", self.source, mesh_ref.1, safe_name(&m.mesh.name));
+        self.write_model(asset, mesh_ref, &m.mesh.name, geometry, materials, Some(key))
+    }
+
+    /// The static batch a mesh filter's renderer draws from, if it does:
+    /// only Unity's merged meshes ("Combined Mesh (root: ...)") count.
+    fn batch_of(&mut self, mesh_ref: Ref, renderer: Ref) -> Option<Batch> {
+        let batch = static_batch(self.g, renderer)?;
+        let m = self.read_mesh(mesh_ref)?;
+        (m.mesh.name.starts_with("Combined Mesh") && batch.0 + batch.1 <= m.mesh.sub_meshes.len() && !m.mesh.compressed).then_some(batch)
+    }
+
+    /// The sub-meshes a static-batched renderer draws, as a model in the
+    /// object's own space (one per object: the vertices depend on where it is).
+    fn batched_model(&mut self, mesh_ref: Ref, materials: &[Ref], batch: Batch, tf_ref: Ref, name: &str) -> Option<String> {
+        let m = self.read_mesh(mesh_ref)?;
+        let to_local = self.batch_to_local(batch, tf_ref)?;
+        let geometry = Geometry::of(&m, batch.0..batch.0 + batch.1, Some(&to_local))?;
+        let file = safe_name(self.file_name(mesh_ref));
+        let asset = format!("models/{}/{file}/{}-{}-{}.glb", self.source, mesh_ref.1, tf_ref.1, safe_name(name));
+        self.write_model(asset, mesh_ref, name, geometry, materials, None)
+    }
+
+    /// Batch space (the world, or the batch root's space) -> the object's own space.
+    fn batch_to_local(&self, batch: Batch, tf_ref: Ref) -> Option<Mat> {
+        let root = batch.2.map(|r| world_of(self.g, r)).unwrap_or(IDENTITY);
+        Some(mat_mul(&mat_inv(&world_of(self.g, tf_ref))?, &root))
+    }
+
+    /// A static-batched renderer's own part of the merged mesh, in its own space and GameX axes.
+    fn batched_geometry(&mut self, mesh_ref: Ref, batch: Batch, tf_ref: Ref) -> Option<Geometry> {
+        let m = self.read_mesh(mesh_ref)?;
+        let to_local = self.batch_to_local(batch, tf_ref)?;
+        Geometry::of(&m, batch.0..batch.0 + batch.1, Some(&to_local))
+    }
+
+    /// Writes a GLB model into the project and remembers where it came from.
+    fn write_model(&mut self, asset: String, mesh_ref: Ref, name: &str, geometry: Geometry, materials: &[Ref], key: Option<(Ref, Vec<Ref>)>) -> Option<String> {
+        let Geometry { positions, normals, uvs, subs } = geometry;
         let mut surfaces = Vec::new();
-        for (i, sub) in mesh.sub_meshes.iter().enumerate() {
-            let tri = mesh.triangles(sub);
-            if tri.is_empty() {
-                continue;
-            }
-            // Mirroring turns the faces round, so the corners are swapped back.
-            let indices: Vec<u32> = tri.as_chunks::<3>().0.iter().flat_map(|t| [t[0], t[2], t[1]]).filter(|&i| (i as usize) < n).collect();
-            let mut material = glb::Material { name: format!("{} {}", mesh.name, i + 1), color: [0.75, 0.75, 0.78, 1.0], texture: None };
+        for (i, indices) in subs {
+            let mut material = glb::Material { name: format!("{name} {}", i + 1), color: [0.75, 0.75, 0.78, 1.0], texture: None };
             if let Some(&m) = materials.get(i).or(materials.last()) {
                 let (color, texture) = read_material(self.g, m);
                 material.color = color;
@@ -570,7 +717,19 @@ impl Ctx<'_> {
         if surfaces.is_empty() {
             return None;
         }
-        let bytes = glb::write(&mesh.name, &surfaces).ok()?;
+        let bytes = glb::write(name, &surfaces).ok()?;
+        // Static-batched copies of one object: the same model, written once.
+        let same = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            bytes.hash(&mut h);
+            (mesh_ref, h.finish())
+        };
+        if key.is_none() {
+            if let Some(a) = self.same_models.get(&same) {
+                return Some(a.clone());
+            }
+        }
         let target = self.dir.join("assets").join(&asset);
         fs::create_dir_all(target.parent()?).ok()?;
         fs::write(&target, bytes).ok()?;
@@ -579,24 +738,103 @@ impl Ctx<'_> {
             Origin { file: self.file_name(mesh_ref).to_string(), object: Some(mesh_ref.1.to_string()), field: None, fidelity: Fidelity::Exact, note: None },
         );
         self.report.assets += 1;
-        self.assets.insert(key, asset.clone());
+        match key {
+            Some(key) => self.assets.insert(key, asset.clone()),
+            None => self.same_models.insert(same, asset.clone()),
+        };
         Some(asset)
     }
+}
 
-    /// A mesh's bounds (centre, size) in GameX axes.
-    fn mesh_bounds(&self, r: Ref) -> Option<([f32; 3], [f32; 3])> {
-        let mesh = self.read_mesh(r)?;
-        let (pos, dim) = mesh.channel(0).filter(|(_, d)| *d >= 3)?;
+fn round_to(x: f32, step: f32) -> f32 {
+    (x / step).round() * step + 0.0
+}
+
+/// A mesh with its vertex channels read out.
+struct Decoded {
+    mesh: Mesh,
+    pos: Option<(Vec<f32>, usize)>,
+    normals: Option<(Vec<f32>, usize)>,
+    uvs: Option<(Vec<f32>, usize)>,
+}
+
+/// A static batch: first sub-mesh, how many, the batch root.
+type Batch = (usize, usize, Option<Ref>);
+
+/// Some of a mesh's sub-meshes in GameX axes, with only the vertices they use.
+struct Geometry {
+    positions: Vec<[f32; 3]>,
+    normals: Vec<[f32; 3]>,
+    uvs: Vec<[f32; 2]>,
+    /// (sub-mesh number within the range, triangle corners).
+    subs: Vec<(usize, Vec<u32>)>,
+}
+
+impl Geometry {
+    /// `to_local` first moves the vertices (Unity axes), for static batches.
+    fn of(m: &Decoded, range: std::ops::Range<usize>, to_local: Option<&Mat>) -> Option<Geometry> {
+        let mesh = &m.mesh;
+        let (pos, dim) = m.pos.as_ref().map(|(p, d)| (p, *d))?;
+        let (normals, uvs) = (&m.normals, &m.uvs);
+        let n = mesh.vertex_count as usize;
+        // Normals move by the inverse transpose of the vertices' matrix.
+        let normal_m = to_local.and_then(mat_inv);
+        let mut out = Geometry { positions: Vec::new(), normals: Vec::new(), uvs: Vec::new(), subs: Vec::new() };
+        let mut new_index: HashMap<u32, u32> = HashMap::new();
+        for (i, sub) in mesh.sub_meshes.get(range)?.iter().enumerate() {
+            let tri = mesh.triangles(sub);
+            if tri.is_empty() {
+                continue;
+            }
+            let mut indices = Vec::with_capacity(tri.len());
+            // Mirroring turns the faces round, so the corners are swapped back.
+            for t in tri.as_chunks::<3>().0.iter().filter(|t| t.iter().all(|&v| (v as usize) < n)) {
+                for v in [t[0], t[2], t[1]] {
+                    let next = out.positions.len() as u32;
+                    let at = *new_index.entry(v).or_insert_with(|| {
+                        let v = v as usize;
+                        let mut p = [pos[v * dim], pos[v * dim + 1], pos[v * dim + 2]];
+                        if let Some(m) = to_local {
+                            // Rounded, so copies of one object come out the same and share a model.
+                            p = mat_point(m, p).map(|x| (x * 10000.0).round() / 10000.0 + 0.0);
+                        }
+                        out.positions.push([-p[0], p[1], p[2]]);
+                        if let Some((nv, d)) = &normals {
+                            let mut q = [nv[v * d], nv[v * d + 1], nv[v * d + 2]];
+                            if let Some(m) = &normal_m {
+                                q = [0, 1, 2].map(|k| m[0][k] * q[0] + m[1][k] * q[1] + m[2][k] * q[2]);
+                                let len = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2]).sqrt().max(1e-9);
+                                q = q.map(|x| (x / len * 1000.0).round() / 1000.0 + 0.0);
+                            }
+                            out.normals.push([-q[0], q[1], q[2]]);
+                        }
+                        if let Some((uv, d)) = &uvs {
+                            out.uvs.push([uv[v * d], 1.0 - uv[v * d + 1]]);
+                        }
+                        next
+                    });
+                    indices.push(at);
+                }
+            }
+            if !indices.is_empty() {
+                out.subs.push((i, indices));
+            }
+        }
+        (!out.subs.is_empty()).then_some(out)
+    }
+
+    /// Centre and size.
+    fn bounds(&self) -> Option<([f32; 3], [f32; 3])> {
         let mut min = [f32::MAX; 3];
         let mut max = [f32::MIN; 3];
-        for v in 0..mesh.vertex_count as usize {
-            let p = [-pos[v * dim], pos[v * dim + 1], pos[v * dim + 2]];
+        for p in &self.positions {
             for k in 0..3 {
                 min[k] = min[k].min(p[k]);
                 max[k] = max[k].max(p[k]);
             }
         }
-        (min[0] <= max[0]).then(|| ([0, 1, 2].map(|k| (min[k] + max[k]) / 2.0), [0, 1, 2].map(|k| (max[k] - min[k]).max(0.02))))
+        // The true size, however small: the object may be scaled up a thousand times.
+        (min[0] <= max[0]).then(|| ([0, 1, 2].map(|k| (min[k] + max[k]) / 2.0), [0, 1, 2].map(|k| max[k] - min[k])))
     }
 }
 
@@ -607,6 +845,8 @@ struct Made {
     /// Parts that sit off the object's origin (a collider's centre, a sprite's pivot).
     offset_parts: Vec<(String, [f32; 3], [f32; 3], Part)>,
     scripts: Vec<String>,
+    /// What its components say it does ("controller", "pathfinding", "animated"), as tags.
+    does: Vec<&'static str>,
     canvas: bool,
     grid: Option<[f32; 3]>,
 }
@@ -655,7 +895,7 @@ fn trigger_of(ctx: &Ctx, d: &[u8], two_d: bool) -> bool {
     d.get(at).is_some_and(|b| *b == 1)
 }
 
-fn components(ctx: &mut Ctx, go: &GameObj, inherited: Option<[f32; 3]>) -> Made {
+fn components(ctx: &mut Ctx, tf_ref: Ref, go: &GameObj, inherited: Option<[f32; 3]>) -> Made {
     let g = ctx.g;
     let flat = ctx.flat;
     let comps: Vec<(Ref, i32)> = go.components.iter().filter_map(|&r| g.class(r).map(|c| (r, c))).collect();
@@ -672,12 +912,29 @@ fn components(ctx: &mut Ctx, go: &GameObj, inherited: Option<[f32; 3]>) -> Made 
         match class {
             TRANSFORM | RECT_TRANSFORM | RIGIDBODY | RIGIDBODY_2D | MESH_RENDERER | TILEMAP_RENDERER | TILEMAP_COLLIDER_2D => {}
             CANVAS => made.canvas = true,
+            // Not translated, but they say what the object is.
+            ANIMATOR | NAV_MESH_AGENT => {
+                made.does.push(if class == ANIMATOR { "animated" } else { "pathfinding" });
+                *ctx.report.untranslated.entry(class_name(class)).or_default() += 1;
+            }
             GRID => made.grid = floats(&d, 16, 3, little).map(|v| [v[0], v[1], v[2]]),
             MESH_FILTER | SKINNED_MESH_RENDERER => {
+                if class == SKINNED_MESH_RENDERER {
+                    made.does.push("animated");
+                }
                 let mesh = if class == MESH_FILTER { g.pptr_at(r.0, &d, 12).filter(|m| g.class(*m) == Some(MESH)) } else { g.scan(r.0, &d, 12, &[MESH]) };
                 let renderer = if class == MESH_FILTER { comps.iter().find(|c| c.1 == MESH_RENDERER).map(|c| c.0) } else { Some(r) };
                 let materials = renderer.map(|x| renderer_materials(g, x)).unwrap_or_default();
-                if let Some(asset) = mesh.and_then(|m| ctx.model(m, &materials)) {
+                let batch = match (mesh, renderer) {
+                    (Some(m), Some(x)) if class == MESH_FILTER => ctx.batch_of(m, x),
+                    _ => None,
+                };
+                let asset = match (mesh, batch) {
+                    (Some(m), Some(b)) => ctx.batched_model(m, &materials, b, tf_ref, &go.name),
+                    (Some(m), None) => ctx.model(m, &materials),
+                    _ => None,
+                };
+                if let Some(asset) = asset {
                     made.parts.push(Part::Model { asset });
                 } else if mesh.is_some() {
                     *ctx.report.untranslated.entry("unreadable meshes".into()).or_default() += 1;
@@ -688,7 +945,7 @@ fn components(ctx: &mut Ctx, go: &GameObj, inherited: Option<[f32; 3]>) -> Made 
                 let Some(info) = read_sprite(g, sprite) else { continue };
                 sprite_size = Some(info.size);
                 let part = match ctx.exported(sprite, "textures") {
-                    Some(asset) => Part::Sprite { asset, frame: None, size: Some(info.size), flip_x: false },
+                    Some(asset) => Part::Sprite { asset, frame: None, size: Some(info.size), flip_x: false, frames: Vec::new(), fps: None },
                     None => Part::Shape { shape: ShapeKind::Box, size: [info.size[0], info.size[1], 0.01], color: "#9aa3c0".into() },
                 };
                 let center = [(0.5 - info.pivot[0]) * info.size[0], (0.5 - info.pivot[1]) * info.size[1], 0.0];
@@ -730,9 +987,12 @@ fn components(ctx: &mut Ctx, go: &GameObj, inherited: Option<[f32; 3]>) -> Made 
                 }
             }
             BOX_COLLIDER | SPHERE_COLLIDER | CAPSULE_COLLIDER | CHARACTER_CONTROLLER | MESH_COLLIDER => {
+                if class == CHARACTER_CONTROLLER {
+                    made.does.push("controller");
+                }
                 let trigger = class != CHARACTER_CONTROLLER && trigger_of(ctx, &d, false);
                 let body = if class == CHARACTER_CONTROLLER { Body::Kinematic } else { body };
-                let part = |shape, size: [f32; 3]| Part::Collider { shape, size: size.map(f32::abs), body, trigger };
+                let part = |shape, size: [f32; 3]| Part::Collider { shape, size: size.map(f32::abs), body, trigger, boxes: Vec::new() };
                 let tail = |n: usize| len.checked_sub(n);
                 let (p, center) = match class {
                     BOX_COLLIDER => {
@@ -766,8 +1026,34 @@ fn components(ctx: &mut Ctx, go: &GameObj, inherited: Option<[f32; 3]>) -> Made 
                         let mesh = g.scan(r.0, &d, 12, &[MESH]).or_else(|| {
                             comps.iter().find(|c| c.1 == MESH_FILTER).and_then(|c| g.bytes(c.0).and_then(|fd| g.pptr_at(c.0 .0, &fd, 12)))
                         });
-                        let Some((center, size)) = mesh.and_then(|m| ctx.mesh_bounds(m)) else { continue };
-                        add(&mut made, part(ShapeKind::Box, size), center.map(|x| (x * 10000.0).round() / 10000.0 + 0.0), "Collider");
+                        // A static-batched mesh is the whole merged scene: only this object's part counts.
+                        let renderer = comps.iter().find(|c| c.1 == MESH_RENDERER).map(|c| c.0);
+                        let batch = mesh.zip(renderer).and_then(|(m, x)| ctx.batch_of(m, x));
+                        let geometry = match (mesh, batch) {
+                            (Some(m), Some(b)) => ctx.batched_geometry(m, b, tf_ref),
+                            (Some(m), None) => ctx.read_mesh(m).and_then(|d| Geometry::of(&d, 0..d.mesh.sub_meshes.len(), None)),
+                            _ => None,
+                        };
+                        let Some(geometry) = geometry else { continue };
+                        let Some((center, size)) = geometry.bounds() else { continue };
+                        // How big it really is: objects are often modelled small and scaled up.
+                        let world = world_of(ctx.g, tf_ref);
+                        let scale = [0, 1, 2].map(|k| (0..3).map(|i| world[i][k] * world[i][k]).sum::<f32>().sqrt().max(1e-6));
+                        // Rounded to a tenth of a millimetre in the world.
+                        let step = 1e-4 / scale.iter().fold(1e-6f32, |a, b| a.max(*b));
+                        let center = center.map(|x| round_to(x, step));
+                        let mut p = part(ShapeKind::Box, size);
+                        // Something you could stand in (a room, a house): its walls and floors, not the box around it.
+                        if (0..3).filter(|&k| size[k] * scale[k] > HOLLOW).count() >= 2 {
+                            let corners: Vec<u32> = geometry.subs.iter().flat_map(|(_, t)| t.iter().copied()).collect();
+                            // Cut up in metres, then put back in the object's own units.
+                            let metres: Vec<[f32; 3]> = geometry.positions.iter().map(|p| [0, 1, 2].map(|k| p[k] * scale[k])).collect();
+                            let solid = solid::boxes(&metres, &corners);
+                            if let Part::Collider { boxes, .. } = &mut p {
+                                *boxes = solid.into_iter().map(|b| [0, 1, 2, 3, 4, 5].map(|i| round_to(b[i] / scale[i % 3] - center[i % 3], step))).collect();
+                            }
+                        }
+                        add(&mut made, p, center, "Collider");
                         continue;
                     }
                 };
@@ -775,7 +1061,7 @@ fn components(ctx: &mut Ctx, go: &GameObj, inherited: Option<[f32; 3]>) -> Made 
             }
             BOX_COLLIDER_2D | CIRCLE_COLLIDER_2D | CAPSULE_COLLIDER_2D | POLYGON_COLLIDER_2D | EDGE_COLLIDER_2D | COMPOSITE_COLLIDER_2D => {
                 let trigger = trigger_of(ctx, &d, true);
-                let collider = |shape, w: f32, h: f32| Part::Collider { shape, size: [w.abs(), h.abs(), 1.0], body, trigger };
+                let collider = |shape, w: f32, h: f32| Part::Collider { shape, size: [w.abs(), h.abs(), 1.0], body, trigger, boxes: Vec::new() };
                 let v2 = |at: Option<usize>| at.and_then(|at| floats(&d, at, 2, little));
                 let (p, center) = match class {
                     BOX_COLLIDER_2D if len >= 100 => {
@@ -937,7 +1223,7 @@ fn tile_sprites(g: &Game, from: usize, d: &[u8], at: usize, little: bool) -> Opt
 fn entity(ctx: &mut Ctx, tf_ref: Ref, depth: usize, cell: Option<[f32; 3]>) -> Option<Entity> {
     let tf = read_transform(ctx.g, tf_ref)?;
     let go = tf.go.filter(|r| ctx.g.class(*r) == Some(GAME_OBJECT)).and_then(|r| read_game_object(ctx.g, r))?;
-    let made = components(ctx, &go, cell);
+    let made = components(ctx, tf_ref, &go, cell);
     if made.canvas {
         *ctx.report.untranslated.entry("UI canvas".into()).or_default() += 1;
         return None;
@@ -954,8 +1240,11 @@ fn entity(ctx: &mut Ctx, tf_ref: Ref, depth: usize, cell: Option<[f32; 3]>) -> O
         c.parts.push(part);
         e.children.push(c);
     }
-    if !made.scripts.is_empty() {
-        e.tags = made.scripts.iter().map(|s| format!("script:{s}")).collect();
+    e.tags = made.scripts.iter().map(|s| format!("script:{s}")).collect();
+    for d in made.does {
+        if !e.tags.iter().any(|t| t == d) {
+            e.tags.push(d.into());
+        }
     }
     ctx.report.entities += 1;
     if depth < 64 {
@@ -1027,21 +1316,35 @@ impl ThingMaker {
         }
         for e in list.iter_mut() {
             let base = base_name(&e.name).to_string();
-            // Its own name, scripts and colliders say what it is (not those of objects inside it).
+            // What its own components do (not those of objects inside it), then its name and scripts.
             let scripts: Vec<String> = e.tags.iter().filter_map(|t| t.strip_prefix("script:")).map(String::from).collect();
-            let (mut kind, role) = guess_kind(&format!("{base} {}", scripts.join(" ")), "");
+            let tagged = |t: &str| e.tags.iter().any(|x| x == t);
             let own: Vec<&Part> = e.parts.iter().chain(e.children.iter().filter(|c| is_helper(c)).flat_map(|c| c.parts.iter())).collect();
-            let moving = own.iter().any(|p| matches!(p, Part::Collider { body: Body::Kinematic | Body::Dynamic, .. } | Part::Collider { trigger: true, .. }));
+            let colliders: Vec<(&Body, bool)> = own.iter().filter_map(|p| if let Part::Collider { body, trigger, .. } = p { Some((body, *trigger)) } else { None }).collect();
+            let script_words = roles::words_of(&scripts.join(" "));
+            let signals = roles::Signals {
+                name: base.clone(),
+                scripts: scripts.join(" "),
+                camera: e.walk().iter().any(|x| x.parts.iter().any(|p| matches!(p, Part::Camera { .. }))),
+                controller: tagged("controller"),
+                moves: colliders.iter().any(|(b, t)| **b == Body::Dynamic && !t),
+                agent: tagged("pathfinding") || script_words.iter().any(|w| ["ai", "chase", "patrol", "hunt", "pathfinding", "navigation"].contains(&w.as_str())),
+                trigger_only: !colliders.is_empty() && colliders.iter().all(|(_, t)| *t),
+                animated: e.walk().iter().any(|x| x.tags.iter().any(|t| t == "animated")),
+                copies: counts.get(&base).copied().unwrap_or(0),
+            };
+            let guess = roles::classify(&signals);
+            let (mut kind, role) = (guess.kind, guess.role.clone());
             // Something to see or touch: empty folders of objects stay plain entities.
             let has_look = e.walk().iter().flat_map(|x| x.parts.iter()).any(|p| matches!(p, Part::Model { .. } | Part::Sprite { .. } | Part::Shape { .. } | Part::Collider { .. } | Part::Tiles { .. }));
-            let repeated = counts.get(&base).copied().unwrap_or(0) >= 2;
-            let wanted = has_look && (repeated || role.is_some() || kind == ThingKind::Item || moving);
+            let repeated = signals.copies >= 2;
+            let wanted = has_look && (repeated || role.is_some() || matches!(kind, ThingKind::Item | ThingKind::Character | ThingKind::Tool));
             if !wanted {
                 self.visit(&mut e.children, scene, origin);
                 continue;
             }
             if kind == ThingKind::Other {
-                kind = if moving { ThingKind::Character } else { ThingKind::Prop };
+                kind = ThingKind::Prop;
             }
             let key = (base.clone(), signature(e));
             let id = match self.by_key.get(&key) {
@@ -1061,7 +1364,7 @@ impl ThingMaker {
                         name: base.clone(),
                         kind,
                         role,
-                        description: Some(format!("Translated from Unity ({scene}: {})", e.name)),
+                        description: Some(format!("Translated from Unity ({scene}: {}). {}", e.name, guess.sentence())),
                         properties: Vec::new(),
                         parts: e.parts.clone(),
                         behaviors: Vec::new(),
@@ -1069,7 +1372,7 @@ impl ThingMaker {
                     });
                     origin.insert(
                         format!("thing:{id}"),
-                        Origin { file: scene.into(), object: Some(e.name.clone()), field: None, fidelity: Fidelity::Approximated, note: Some("made from the first of its copies; kind and role guessed from names and scripts".into()) },
+                        Origin { file: scene.into(), object: Some(e.name.clone()), field: None, fidelity: Fidelity::Approximated, note: Some(format!("made from the first of its copies; kind and role: {}", guess.why)) },
                     );
                     self.by_key.insert(key, id.clone());
                     id
@@ -1102,6 +1405,8 @@ pub fn translate(data: &Path, exports: &Exports, dir: &Path, source: &str, name:
         report: Report { source: source.into(), engine: format!("Unity {}", game.version_text), ..Default::default() },
         origin: BTreeMap::new(),
         assets: HashMap::new(),
+        meshes: HashMap::new(),
+        same_models: HashMap::new(),
         scripts: HashSet::new(),
         taken: HashSet::new(),
         flat: false,
@@ -1116,6 +1421,7 @@ pub fn translate(data: &Path, exports: &Exports, dir: &Path, source: &str, name:
     let mut start = None;
     for (f, level_name) in &levels {
         let f = *f;
+        ctx.meshes.clear();
         let flat2 = game.objects_of(f, &[SPRITE_RENDERER, TILEMAP, BOX_COLLIDER_2D, CIRCLE_COLLIDER_2D, POLYGON_COLLIDER_2D]).len();
         let flat3 = game.objects_of(f, &[MESH_FILTER, SKINNED_MESH_RENDERER]).len();
         ctx.flat = flat2 > flat3;
@@ -1185,6 +1491,26 @@ pub fn data_folder(dir: &Path) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use crate::unity::tests::{serialized_file_with, W};
+
+    fn tf(position: [f32; 3], rotation: [f32; 4], scale: [f32; 3]) -> Tf {
+        Tf { go: None, rotation, position, scale, children: Vec::new(), father: None }
+    }
+
+    #[test]
+    fn matrices_undo_a_placement() {
+        // Turned a quarter round Y, scaled and moved: the inverse brings a point back.
+        let h = std::f32::consts::FRAC_1_SQRT_2;
+        let m = mat_mul(&trs(&tf([1.0, 2.0, 3.0], [0.0, h, 0.0, h], [2.0, 2.0, 2.0])), &trs(&tf([0.5, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0], [1.0, 3.0, 1.0])));
+        let p = [0.3, -1.2, 4.0];
+        let back = mat_point(&mat_inv(&m).unwrap(), mat_point(&m, p));
+        for k in 0..3 {
+            assert!((back[k] - p[k]).abs() < 1e-4, "{back:?}");
+        }
+        // A quarter turn round Y takes +X to -Z.
+        let q = mat_point(&trs(&tf([0.0; 3], [0.0, h, 0.0, h], [1.0; 3])), [1.0, 0.0, 0.0]);
+        assert!((q[2] + 1.0).abs() < 1e-5 && q[0].abs() < 1e-5, "{q:?}");
+        assert!(mat_inv(&trs(&tf([0.0; 3], [0.0, 0.0, 0.0, 1.0], [1.0, 0.0, 1.0]))).is_none());
+    }
 
     fn pptr(w: &mut W, file: i32, id: i64) {
         w.i32(file);
@@ -1332,10 +1658,21 @@ mod tests {
         let data = PathBuf::from(std::env::var("GX_UNITY_DATA").expect("set GX_UNITY_DATA"));
         let exports = std::env::var("GX_UNITY_EXPORTS").map(|d| Exports::scan(Path::new(&d))).unwrap_or_default();
         let root = tempfile::tempdir().unwrap();
-        let out = project::create(root.path(), "Real").unwrap();
+        // GX_UNITY_OUT keeps the translated layer (to play it); otherwise it goes when the test ends.
+        let base = std::env::var("GX_UNITY_OUT").map(PathBuf::from).unwrap_or_else(|_| root.path().to_path_buf());
+        let out = project::create(&base, "Real").unwrap();
         let started = std::time::Instant::now();
         let report = translate(&data, &exports, &out, "real", "Real").unwrap();
         println!("{report:#?}\ntook {:?}", started.elapsed());
+        let things = project::open_with_things(&out).unwrap().1;
+        let mut kinds: BTreeMap<String, usize> = BTreeMap::new();
+        for t in &things {
+            *kinds.entry(format!("{:?}/{}", t.kind, t.role.as_deref().unwrap_or("-"))).or_default() += 1;
+        }
+        println!("things by kind/role: {kinds:?}");
+        for t in things.iter().filter(|t| t.role.is_some()) {
+            println!("   {} -> {}", t.name, t.description.as_deref().unwrap_or(""));
+        }
         for s in project::open(&out).unwrap().scenes {
             let scene = project::load_scene(&out, &s.id).unwrap();
             let all: Vec<&Entity> = scene.entities.iter().flat_map(|e| e.walk()).collect();

@@ -14,6 +14,7 @@ use serde::Serialize;
 use walkdir::WalkDir;
 
 use super::godot_res::{self as gres, Resources};
+use super::roles;
 use super::model::*;
 use super::project::{self, slug, write_json};
 use crate::scene::{parse_sections, Section};
@@ -418,7 +419,7 @@ impl Ctx<'_> {
         }
         if let Some(found) = item.shape.as_ref().and_then(|s| self.res.resolve(&lib.file, s)) {
             if let Some((shape, size)) = shape_of(found.kind(), found.props(), self.version, false) {
-                parts.push(Part::Collider { shape, size, body: Body::Static, trigger: false });
+                parts.push(Part::Collider { shape, size, body: Body::Static, trigger: false, boxes: Vec::new() });
             }
         }
         let thing = Thing { tags: Vec::new(),
@@ -514,6 +515,36 @@ fn vec(props: &HashMap<String, String>, key: &str) -> Option<Vec<f64>> {
 }
 
 /// A Godot shape resource as a GameX shape and its full size in metres.
+/// A 3D shape given as points: a trimesh (`ConcavePolygonShape3D`, three points a
+/// triangle) becomes the boxes covering its surface; a convex hull, the box around it.
+/// Returns (size, boxes), the size reaching as far as the boxes on each side of the middle.
+fn point_shape(kind: &str, p: &HashMap<String, String>) -> Option<([f32; 3], Vec<[f32; 6]>)> {
+    let concave = matches!(kind, "ConcavePolygonShape3D" | "ConcavePolygonShape");
+    if !concave && !matches!(kind, "ConvexPolygonShape3D" | "ConvexPolygonShape") {
+        return None;
+    }
+    let values = numbers(p.get(if concave { "data" } else { "points" })?)?;
+    let points: Vec<[f32; 3]> = values.as_chunks::<3>().0.iter().map(|v| v.map(|x| x as f32)).collect();
+    if points.len() < 3 {
+        return None;
+    }
+    let boxes = if concave {
+        let corners: Vec<u32> = (0..points.len() as u32 / 3 * 3).collect();
+        super::solid::boxes(&points, &corners)
+    } else {
+        let mut b = [f32::MAX, f32::MAX, f32::MAX, f32::MIN, f32::MIN, f32::MIN];
+        for q in &points {
+            for k in 0..3 {
+                b[k] = b[k].min(q[k]);
+                b[k + 3] = b[k + 3].max(q[k]);
+            }
+        }
+        vec![b]
+    };
+    let reach = |k: usize| boxes.iter().map(|b| b[k].abs().max(b[k + 3].abs())).fold(0.0f32, f32::max);
+    Some(([0, 1, 2].map(|k| round(2.0 * reach(k) as f64)), boxes))
+}
+
 fn shape_of(kind: &str, p: &HashMap<String, String>, version: u32, flat: bool) -> Option<(ShapeKind, [f32; 3])> {
     let px = |v: f64| if flat { v / PIXELS_PER_UNIT } else { v };
     let r32 = |v: f64| round(px(v));
@@ -589,6 +620,64 @@ fn albedo(t: &Tscn, n: &Node, mesh: Option<&HashMap<String, String>>) -> String 
         .unwrap_or_else(|| DEFAULT_COLOR.into())
 }
 
+/// One animation of a SpriteFrames resource.
+struct SpriteAnimation {
+    name: String,
+    speed: f32,
+    /// Each frame's `ExtResource(...)`, in order.
+    frames: Vec<String>,
+}
+
+/// The animations in a SpriteFrames `animations` value (Godot 3 and 4 write it alike):
+/// `[{"frames": [...], "loop": true, "name": &"walk", "speed": 5.0}, ...]`.
+fn sprite_animations(value: &str) -> Vec<SpriteAnimation> {
+    // Each animation is a `{...}` right inside the outer list.
+    let mut objects = Vec::new();
+    let (mut depth, mut start, mut quoted) = (0, 0, false);
+    for (i, c) in value.char_indices() {
+        match c {
+            '"' => quoted = !quoted,
+            _ if quoted => {}
+            '[' | '{' | '(' => {
+                if depth == 1 && c == '{' {
+                    start = i;
+                }
+                depth += 1;
+            }
+            ']' | '}' | ')' => {
+                depth -= 1;
+                if depth == 1 && c == '}' {
+                    objects.push(&value[start..=i]);
+                }
+            }
+            _ => {}
+        }
+    }
+    let field = |o: &str, key: &str| -> Option<String> {
+        let at = o.find(&format!("\"{key}\""))? + key.len() + 2;
+        let rest = o[at..].trim_start().strip_prefix(':')?.trim_start();
+        let end = rest.find([',', '}', '\n']).unwrap_or(rest.len());
+        Some(rest[..end].trim().trim_start_matches('&').trim_matches('"').to_string())
+    };
+    objects
+        .into_iter()
+        .map(|o| {
+            let mut frames = Vec::new();
+            let mut rest = o;
+            while let Some(at) = rest.find("ExtResource") {
+                let Some(end) = rest[at..].find(')') else { break };
+                frames.push(rest[at..at + end + 1].to_string());
+                rest = &rest[at + end + 1..];
+            }
+            SpriteAnimation {
+                name: field(o, "name").unwrap_or_default(),
+                speed: field(o, "speed").and_then(|s| s.parse().ok()).unwrap_or(5.0),
+                frames,
+            }
+        })
+        .collect()
+}
+
 /// The parts one node is made of.
 fn parts_of(ctx: &mut Ctx, t: &Tscn, n: &Node, holder: Holder, flat: bool) -> Vec<Part> {
     let mut parts = Vec::new();
@@ -602,25 +691,33 @@ fn parts_of(ctx: &mut Ctx, t: &Tscn, n: &Node, holder: Holder, flat: bool) -> Ve
                     let ppu = if ty == "Sprite3D" { get(&n.props, "pixel_size").map(|p| 1.0 / p).unwrap_or(100.0) } else { PIXELS_PER_UNIT };
                     let size = ctx.images.get(res).map(|(w, h)| [round(*w as f64 / frames.0 / ppu), round(*h as f64 / frames.1 / ppu)]);
                     let flip_x = n.props.get("flip_h").is_some_and(|v| v.trim() == "true");
-                    parts.push(Part::Sprite { asset, frame: None, size, flip_x });
+                    parts.push(Part::Sprite { asset, frame: None, size, flip_x, frames: Vec::new(), fps: None });
                 }
             }
         }
         "AnimatedSprite2D" | "AnimatedSprite" | "AnimatedSprite3D" => {
-            // The first frame of its animations, so it shows; the animations themselves wait for the animation step.
-            let first = n.props.get("frames").or(n.props.get("sprite_frames")).and_then(|v| t.sub(v)).and_then(|(_, p)| {
-                let anims = p.get("animations")?;
-                let at = anims.find("ExtResource")?;
-                let end = anims[at..].find(')')? + at + 1;
-                t.ext_path(&anims[at..end]).map(|(path, _)| path.clone())
-            });
-            if let Some(asset) = first.as_ref().and_then(|res| ctx.assets.get(res)).cloned() {
-                let res = first.unwrap();
-                let size = ctx.images.get(&res).map(|(w, h)| [round(*w as f64 / PIXELS_PER_UNIT), round(*h as f64 / PIXELS_PER_UNIT)]);
-                parts.push(Part::Sprite { asset, frame: None, size, flip_x: false });
+            // The animation it starts with (its `animation`, else "default", else the first), played in turn.
+            let anims = n.props.get("frames").or(n.props.get("sprite_frames")).and_then(|v| t.sub(v)).and_then(|(_, p)| p.get("animations")).map(|a| sprite_animations(a)).unwrap_or_default();
+            let wanted = n.props.get("animation").map(|a| a.trim().trim_start_matches('&').trim_matches('"').to_string());
+            let chosen = wanted
+                .and_then(|w| anims.iter().find(|a| a.name == w))
+                .or_else(|| anims.iter().find(|a| a.name == "default"))
+                .or(anims.first());
+            let frames: Vec<String> = chosen
+                .map(|a| a.frames.iter().filter_map(|f| t.ext_path(f)).filter_map(|(path, _)| ctx.assets.get(path).cloned()).collect())
+                .unwrap_or_default();
+            if let Some(first) = chosen.and_then(|a| a.frames.iter().find_map(|f| t.ext_path(f))).map(|(path, _)| path.clone()) {
+                if let Some(asset) = frames.first().cloned() {
+                    let size = ctx.images.get(&first).map(|(w, h)| [round(*w as f64 / PIXELS_PER_UNIT), round(*h as f64 / PIXELS_PER_UNIT)]);
+                    let fps = chosen.map(|a| a.speed).filter(|s| *s > 0.0);
+                    let frames = if frames.len() > 1 { frames } else { Vec::new() };
+                    parts.push(Part::Sprite { asset, frame: None, size, flip_x: false, fps: fps.filter(|_| !frames.is_empty()), frames });
+                }
             }
-            parts.push(custom(ty, n, "animations kept for the animation step"));
-            ctx.report.untranslated.entry(format!("{ty} (animations)")).and_modify(|c| *c += 1).or_insert(1);
+            if anims.len() > 1 {
+                // Its other animations aren't switched to yet.
+                parts.push(custom(ty, n, "other animations kept for later"));
+            }
         }
         "MeshInstance3D" | "MeshInstance" => {
             let mesh = n.props.get("mesh").cloned();
@@ -650,16 +747,21 @@ fn parts_of(ctx: &mut Ctx, t: &Tscn, n: &Node, holder: Holder, flat: bool) -> Ve
         }
         "CollisionShape2D" | "CollisionShape3D" | "CollisionShape" => {
             let shape = n.props.get("shape").and_then(|v| t.sub(v));
-            match shape.and_then(|(kind, p)| shape_of(kind, p, ctx.version, flat)) {
-                Some((shape, size)) => {
-                    let (body, trigger) = match holder {
-                        Holder::Body(b) => (b, false),
-                        Holder::Area => (Body::Static, true),
-                        Holder::None => (Body::Static, false),
-                    };
-                    parts.push(Part::Collider { shape, size, body, trigger });
+            let (body, trigger) = match holder {
+                Holder::Body(b) => (b, false),
+                Holder::Area => (Body::Static, true),
+                Holder::None => (Body::Static, false),
+            };
+            // Shapes made of points (3D): walls and floors from triangles, or the box around a convex hull.
+            let points = shape.filter(|_| !flat).and_then(|(kind, p)| point_shape(kind, p));
+            match (points, shape.and_then(|(kind, p)| shape_of(kind, p, ctx.version, flat))) {
+                (Some((size, boxes)), _) => {
+                    parts.push(Part::Collider { shape: ShapeKind::Box, size, body, trigger, boxes });
                 }
-                None => {
+                (None, Some((shape, size))) => {
+                    parts.push(Part::Collider { shape, size, body, trigger, boxes: Vec::new() });
+                }
+                (None, None) => {
                     let kind = shape.map(|(k, _)| k.as_str()).unwrap_or("unknown");
                     parts.push(custom(ty, n, &format!("{kind} shape")));
                     ctx.report.untranslated.entry(format!("collision shape {kind}")).and_modify(|c| *c += 1).or_insert(1);
@@ -748,51 +850,6 @@ pub fn exported(script: &str) -> Vec<Property> {
         }
     }
     out
-}
-
-/// "PauseMenu_singleplayer" -> ["pause", "menu", "singleplayer"]: whole words, so "singleplayer" isn't "player".
-fn words_of(name: &str) -> Vec<String> {
-    let spaced: String = name.chars().fold(String::new(), |mut s, c| {
-        if c.is_uppercase() && s.chars().last().is_some_and(|p| p.is_lowercase()) {
-            s.push(' ');
-        }
-        s.push(if c.is_alphanumeric() { c.to_ascii_lowercase() } else { ' ' });
-        s
-    });
-    spaced.split_whitespace().map(|w| w.trim_end_matches(|c: char| c.is_ascii_digit()).to_string()).filter(|w| !w.is_empty()).collect()
-}
-
-pub(super) fn guess_kind(name: &str, root_ty: &str) -> (ThingKind, Option<String>) {
-    let words = words_of(name);
-    let has = |list: &[&str]| words.iter().any(|w| list.contains(&w.as_str()) || list.iter().any(|l| w.as_str() == format!("{l}s")));
-    // Screens and levels first: a "coins counter" is a label, not a coin.
-    if has(&["menu", "hud", "ui", "gui", "button", "counter", "label", "background", "parallax", "level", "stage", "world", "music", "joystick"]) {
-        return (ThingKind::Other, None);
-    }
-    // What it is beats who uses it: a "player bullet" is a bullet.
-    if has(&["gun", "weapon", "sword", "bullet", "tool", "projectile", "bomb"]) {
-        return (ThingKind::Tool, None);
-    }
-    if has(&["coin", "gem", "key", "pickup", "collectible", "item", "potion", "heart", "powerup", "moneda", "llave", "pocion", "gema", "corazon"]) {
-        return (ThingKind::Item, None);
-    }
-    if has(&["platform", "door", "crate", "box", "wall", "block", "trap", "spike", "spikes", "barrel", "chest", "lever", "switch"]) {
-        return (ThingKind::Prop, None);
-    }
-    if has(&["enemy", "mob", "monster", "zombie", "bat", "slime", "ghost", "boss", "creep", "zombi", "enemigo", "monstruo", "fantasma", "murcielago"]) {
-        return (ThingKind::Character, Some("enemy".into()));
-    }
-    if has(&["player", "hero", "jugador", "heroe"]) {
-        return (ThingKind::Character, Some("player".into()));
-    }
-    if has(&["npc", "villager"]) {
-        return (ThingKind::Character, Some("npc".into()));
-    }
-    match holder_of(root_ty) {
-        Some(Holder::Body(Body::Kinematic)) => (ThingKind::Character, None),
-        Some(_) => (ThingKind::Prop, None),
-        None => (ThingKind::Other, None),
-    }
 }
 
 /// Builds the entity for node `n` and everything under it.
@@ -1160,7 +1217,24 @@ pub fn translate(godot: &Path, dir: &Path, source: &str, name: &str) -> io::Resu
         let Some(root) = t.root() else { continue };
         let flat = flat_scene(t, game_flat);
         let root_ty = root.ty.as_deref().unwrap_or("Node");
-        let (kind, role) = guess_kind(&format!("{} {}", root.name, t.res.rsplit('/').next().unwrap_or(&t.res).trim_end_matches(".tscn")), root_ty);
+        // What the scene's nodes say it does, then its name.
+        let types: Vec<&str> = t.nodes.iter().filter_map(|n| n.ty.as_deref()).collect();
+        let any = |prefixes: &[&str]| types.iter().any(|ty| prefixes.iter().any(|p| ty.starts_with(p)));
+        let body = holder_of(root_ty);
+        let guess = roles::classify(&roles::Signals {
+            name: format!("{} {}", root.name, t.res.rsplit('/').next().unwrap_or(&t.res).trim_end_matches(".tscn")),
+            camera: any(&["Camera"]),
+            controller: matches!(body, Some(Holder::Body(Body::Kinematic))),
+            moves: matches!(body, Some(Holder::Body(Body::Dynamic))),
+            agent: any(&["NavigationAgent"]),
+            trigger_only: matches!(body, Some(Holder::Area)),
+            animated: any(&["AnimatedSprite", "AnimationPlayer", "AnimationTree"]),
+            copies: 0,
+            ..Default::default()
+        });
+        // A body that stays put (or a sensing area) is still part of the level.
+        let kind = if guess.kind == ThingKind::Other && body.is_some() && guess.role.is_none() { ThingKind::Prop } else { guess.kind };
+        let role = guess.role.clone();
         let holder = holder_of(root_ty).unwrap_or(Holder::None);
         let mut taken = HashSet::new();
         let mut properties = ctx.thing_props.get(&id).cloned().unwrap_or_default();
@@ -1181,7 +1255,7 @@ pub fn translate(godot: &Path, dir: &Path, source: &str, name: &str) -> io::Resu
             name: root.name.clone(),
             kind,
             role,
-            description: Some(format!("Translated from {}", t.res)),
+            description: Some(format!("Translated from {}. {}", t.res, guess.sentence())),
             properties,
             parts,
             behaviors: Vec::new(),
@@ -1189,7 +1263,7 @@ pub fn translate(godot: &Path, dir: &Path, source: &str, name: &str) -> io::Resu
         };
         ctx.origin.insert(
             format!("thing:{id}"),
-            Origin { file: t.res.clone(), object: Some(".".into()), field: None, fidelity: Fidelity::Approximated, note: Some("kind and role guessed from names and body type".into()) },
+            Origin { file: t.res.clone(), object: Some(".".into()), field: None, fidelity: Fidelity::Approximated, note: Some(format!("kind and role: {}", guess.why)) },
         );
         write_json(&dir.join("things").join(kind.folder()).join(format!("{id}.thing.json")), &thing)?;
         ctx.report.things += 1;
@@ -1265,6 +1339,33 @@ mod tests {
         assert_eq!(literal("14.5"), Some(Value::Number(14.5)));
         assert_eq!(literal("Color(1, 0, 0, 1)"), Some(Value::Color("#ff0000".into())));
         assert_eq!(literal("\"Hi\""), Some(Value::Text("Hi".into())));
+    }
+
+    #[test]
+    fn reads_trimesh_and_convex_shapes() {
+        let floor: HashMap<String, String> = [("data".to_string(), "PackedVector3Array(-5, 0, -5, 5, 0, -5, 5, 0, 5, -5, 0, -5, 5, 0, 5, -5, 0, 5)".to_string())].into();
+        let (size, boxes) = point_shape("ConcavePolygonShape3D", &floor).unwrap();
+        assert_eq!(boxes.len(), 1);
+        assert_eq!((boxes[0][1], boxes[0][4]), (0.0, 0.0));
+        assert!(size[0] >= 10.0 && size[2] >= 10.0);
+        let hull: HashMap<String, String> = [("points".to_string(), "PoolVector3Array( 0, 0, 0, 2, 1, 0, 0, 3, 4 )".to_string())].into();
+        assert_eq!(point_shape("ConvexPolygonShape", &hull).unwrap().1, vec![[0.0, 0.0, 0.0, 2.0, 3.0, 4.0]]);
+        assert!(point_shape("BoxShape3D", &hull).is_none());
+    }
+
+    #[test]
+    fn reads_sprite_animations() {
+        let four = "[{\n\"frames\": [{\n\"duration\": 1.0,\n\"texture\": ExtResource(\"2_a\")\n}, {\n\"duration\": 1.0,\n\"texture\": ExtResource(\"3_b\")\n}],\n\"loop\": true,\n\"name\": &\"walk\",\n\"speed\": 8.0\n}, {\n\"frames\": [],\n\"loop\": true,\n\"name\": &\"default\",\n\"speed\": 5.0\n}]";
+        let anims = sprite_animations(four);
+        assert_eq!(anims.len(), 2);
+        assert_eq!((anims[0].name.as_str(), anims[0].speed), ("walk", 8.0));
+        assert_eq!(anims[0].frames, vec!["ExtResource(\"2_a\")", "ExtResource(\"3_b\")"]);
+        assert!(anims[1].frames.is_empty());
+        let three = "[ {\n\"frames\": [ ExtResource( 1 ), ExtResource( 2 ) ],\n\"loop\": true,\n\"name\": \"default\",\n\"speed\": 5.0\n} ]";
+        let anims = sprite_animations(three);
+        assert_eq!(anims.len(), 1);
+        assert_eq!(anims[0].name, "default");
+        assert_eq!(anims[0].frames.len(), 2);
     }
 
     #[test]
@@ -1351,7 +1452,7 @@ mod tests {
         assert_eq!((player.kind, player.role.as_deref()), (ThingKind::Character, Some("player")));
         assert_eq!(player.properties[0].value, Value::Integer(400));
         let shape = &player.children[0].parts[0];
-        assert_eq!(shape, &Part::Collider { shape: ShapeKind::Capsule, size: [0.4, 0.6, 0.4], body: Body::Kinematic, trigger: false });
+        assert_eq!(shape, &Part::Collider { shape: ShapeKind::Capsule, size: [0.4, 0.6, 0.4], body: Body::Kinematic, trigger: false, boxes: Vec::new() });
         assert!(player.parts.iter().any(|p| matches!(p, Part::Custom { name, .. } if name == "GDScript")));
 
         let main = project::load_scene(&dir, "main").unwrap();

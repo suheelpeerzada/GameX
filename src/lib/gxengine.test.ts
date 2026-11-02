@@ -119,6 +119,56 @@ test("blocks: a guard patrols, chases the player it can see, and gives up", () =
   assert.ok(g.pos[0] < 4);
 });
 
+test("blocks: play animation tells the Player which clip to show", () => {
+  const wave: Behavior = {
+    format: 1,
+    id: "wave",
+    name: "Wave",
+    rules: [{ when: { block: "everyFrame" }, then: [{ block: "playAnimation", args: { animation: { type: "text", value: "Wave" } } }] }],
+  };
+  const waver: Thing = { format: 1, id: "waver", name: "Waver", kind: "character", parts: [box(0.8, 1.8, "kinematic")], behaviors: [{ behavior: "wave" }] };
+  const ground: Entity = { id: "ground", name: "Ground", transform: at(0, -0.5, 0), parts: [{ type: "collider", shape: "box", size: [20, 1, 20], body: "static" }] };
+  const { world } = createWorld(scene("3d", [ground, { id: "w", name: "Waver", thing: "waver", transform: at(3, 0.9, 0) }]), { ...things, waver }, { wave });
+  const a = world.actors.find((x) => x.id === "w")!;
+  assert.equal(a.anim, undefined);
+  run(world, idle, 0.1);
+  assert.equal(a.anim, "Wave");
+});
+
+test("a house read from a mesh: the player inside stands on its floor and steps up a low ledge", () => {
+  // Floor, one wall and a 0.2 m step, as the reader writes them; the box around them holds the player.
+  const house: Entity = {
+    id: "house",
+    name: "House",
+    transform: at(0, 2, 0),
+    parts: [
+      {
+        type: "collider",
+        shape: "box",
+        size: [10, 4, 10],
+        body: "static",
+        boxes: [
+          [-5, -2, -5, 5, -1.8, 5],
+          [-5, -2, -5, -4.8, 2, 5],
+          [1, -1.8, -5, 5, -1.6, 5],
+        ],
+      },
+    ],
+  };
+  const walker: Thing = { ...things.player, properties: [{ name: "speed", type: "number", value: 3 }] };
+  const { world } = createWorld(scene("3d", [house, { id: "p", name: "Player", thing: "player", transform: at(0, 1, 0) }]), { ...things, player: walker }, {});
+  const p = world.player!;
+  run(world, idle, 1);
+  assert.ok(Math.abs(p.pos[1] + p.offset[1] - p.half[1] - 0.2) < 0.01, `on the floor: feet at ${p.pos[1] + p.offset[1] - p.half[1]}`);
+  // Walk right onto the step.
+  run(world, { move: [1, 0, 0], jump: false, jumpPressed: false, pressed: [] }, 1.5);
+  assert.ok(p.pos[0] > 1.5, `got past the step edge: x ${p.pos[0]}`);
+  assert.ok(Math.abs(p.pos[1] + p.offset[1] - p.half[1] - 0.4) < 0.01, `up the step: feet at ${p.pos[1] + p.offset[1] - p.half[1]}, x ${p.pos[0]}, speed ${world.speed}`);
+  // The wall stops it going left.
+  run(world, { move: [-1, 0, 0], jump: false, jumpPressed: false, pressed: [] }, 4);
+  assert.ok(p.pos[0] + p.offset[0] - p.half[0] >= -4.81, `stopped by the wall: x ${p.pos[0]}`);
+});
+
 test("solid tiles become boxes, neighbours in a row merged", () => {
   const tiles: Part & { type: "tiles" } = {
     type: "tiles",
@@ -157,4 +207,32 @@ test("the editor's Behavior switches: an enemy that can't attack or move", () =>
   run(world, idle, 1);
   assert.equal(world.health, 100);
   assert.equal(e.pos[0], x);
+});
+
+test("a redrawn enemy walks the path it walked in the game, there and back", () => {
+  const path: Part = { type: "custom", name: "Recorded path", values: { points: { type: "text", value: "2,0;4,0;4,2" } } };
+  const { world } = createWorld(
+    scene("2d", [{ id: "p", name: "Player", thing: "player", transform: at(-6, 0) }, { id: "e", name: "Bat", thing: "slime", transform: at(2, 0), parts: [path] }]),
+    things,
+    {},
+  );
+  const e = world.actors.find((a) => a.id === "e")!;
+  assert.equal(e.path?.length, 3);
+  run(world, idle, 1.6);
+  assert.ok(e.pos[0] > 3.5, `went along the path: ${e.pos}`);
+  run(world, idle, 1);
+  assert.ok(e.pos[1] > 1, `heads for the last point: ${e.pos}`);
+  run(world, idle, 3);
+  assert.ok(e.pos[0] < 3, `and walks back: ${e.pos}`);
+});
+
+test("the player switched on plays, not a switched-off copy; things that fell through the floor leave", () => {
+  const off: Entity = { id: "p-off", name: "Player", thing: "player", transform: at(-5, 2), active: false };
+  const on: Entity = { id: "p-on", name: "Player", thing: "player", transform: at(5, 2) };
+  const crate: Entity = { id: "crate", name: "Crate", transform: at(30, 0), parts: [box(1, 1, "dynamic")] };
+  const { world } = createWorld(scene("2d", [floor, off, on, crate]), things, {});
+  assert.equal(world.player?.id, "p-on");
+  // The crate is beyond the floor: it falls, and is gone once it's far below where it started.
+  run(world, idle, 6);
+  assert.equal(world.actors.find((a) => a.id === "crate")?.alive, false);
 });

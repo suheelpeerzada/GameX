@@ -405,8 +405,11 @@ fn indices(data: Option<Vec<u8>>, count: usize, vertices: usize) -> Vec<u32> {
     out
 }
 
+/// A surface's vertices, texture coordinates and triangle corners.
+type Surface = (Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<u32>);
+
 /// One surface of an ArrayMesh, Godot 4 (`_surfaces` entries).
-fn surface_g4(s: &V) -> Option<(Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<u32>)> {
+fn surface_g4(s: &V) -> Option<Surface> {
     let format = s.get("format")?.num()? as u64;
     if s.get("primitive").and_then(V::num).unwrap_or(3.0) as u32 != 3 {
         return None; // only triangles
@@ -460,7 +463,7 @@ fn surface_g4(s: &V) -> Option<(Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<u32>)> {
 }
 
 /// One surface of an ArrayMesh, Godot 3 (`surfaces/N` values): interleaved.
-fn surface_g3(s: &V) -> Option<(Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<u32>)> {
+fn surface_g3(s: &V) -> Option<Surface> {
     let format = s.get("format")?.num()? as u64;
     if s.get("primitive").and_then(V::num).unwrap_or(4.0) as u32 != 4 {
         return None;
@@ -654,7 +657,7 @@ pub fn tile_cells(props: &HashMap<String, String>, set: &TileSet, version: u32) 
     let split = |v: i64| ((v & 0xffff) as u16 as i16 as i32, ((v >> 16) & 0xffff) as u16 as i16 as i32);
     if let Some(data) = props.get("tile_map_data").and_then(|d| parse(d)).and_then(|d| d.bytes()) {
         // 4.3+: u16 format, then 12 bytes per cell.
-        for c in data.get(2..).unwrap_or(&[]).chunks_exact(12) {
+        for c in data.get(2..).unwrap_or(&[]).as_chunks::<12>().0 {
             let r = |k: usize| u16::from_le_bytes([c[k], c[k + 1]]);
             let (x, y) = (r(0) as i16 as i32, r(2) as i16 as i32);
             let alt = r(10) as i32;
@@ -668,11 +671,11 @@ pub fn tile_cells(props: &HashMap<String, String>, set: &TileSet, version: u32) 
     layers.sort();
     for key in layers {
         let v = ints(&props[key]);
-        for t in v.chunks_exact(3) {
+        for t in v.as_chunks::<3>().0 {
             let (a, b, c) = (t[0] as i64, t[1] as i64, t[2] as i64);
             let (x, y) = split(a);
             if version >= 4 {
-                let (source, ax) = ((b & 0xffff) as i64, ((b >> 16) & 0xffff) as u32);
+                let (source, ax) = (b & 0xffff, ((b >> 16) & 0xffff) as u32);
                 let (ay, alt) = ((c & 0xffff) as u32, ((c >> 16) & 0xffff) as i32);
                 if let Some(&sheet) = set.by_id.get(&source) {
                     out.push((x, y, sheet, ax, ay, flags_g4(alt)));
@@ -738,7 +741,7 @@ pub fn grid_cells(props: &HashMap<String, String>) -> Vec<GridCell> {
     let Some(data) = props.get("data").and_then(|d| parse(d)) else { return Vec::new() };
     let cells = data.get("cells").map(V::numbers).unwrap_or_default();
     cells
-        .chunks_exact(3)
+        .as_chunks::<3>().0.iter()
         .map(|c| {
             let (a, b, v) = (c[0] as i64 as u32, c[1] as i64 as u32, c[2] as i64 as u32);
             GridCell {
@@ -798,7 +801,7 @@ mod tests {
     fn reads_tile_maps_from_godot_3_and_4() {
         let set = TileSet { cell: [16.0, 16.0], sheets: Vec::new(), by_id: HashMap::from([(0, 0), (5, 1)]) };
         // Godot 4: cell (2, -1), source 5, atlas (3, 4).
-        let key = (2i64 & 0xffff) | (((-1i64) & 0xffff) << 16);
+        let key = 2i64 | (0xffff << 16); // y = -1 in 16 bits
         let g4 = HashMap::from([("layer_0/tile_data".to_string(), format!("PackedInt32Array({key}, {}, 4)", 5 | (3 << 16)))]);
         assert_eq!(tile_cells(&g4, &set, 4), vec![(2, -1, 1, 3, 4, 0)]);
         // Godot 3: tile 0 flipped horizontally, autotile (1, 2).

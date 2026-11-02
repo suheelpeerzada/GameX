@@ -1,0 +1,42 @@
+name: Release
+
+# Pushing a version tag (v1.0.1) builds the Windows installer and attaches it,
+# with the update files the app checks for, to a GitHub Release.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - run: npm ci
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Signs the update files, so the app only installs updates made here.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: GameX ${{ github.ref_name }}
+          releaseBody: Download the GameX setup file below (GameX_..._x64-setup.exe) and run it.
+          releaseDraft: false
+          prerelease: false
+          # latest.json: what the app's updater reads.
+          includeUpdaterJson: true
+          # The signed update files are made here only, so a local build needs no key.
+          args: --config src-tauri/tauri.release.conf.json

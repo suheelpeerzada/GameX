@@ -16,6 +16,8 @@ import {
 } from "../lib/modelio";
 import { FORMAT_NAMES, MODEL_FORMATS, replacePlan } from "../lib/models";
 import type { EditState } from "../lib/types";
+import { errorText } from "../lib/errors";
+import ErrorText from "./ErrorText";
 
 /** A model with the side files it loaded from, freed together. */
 interface Opened {
@@ -91,7 +93,7 @@ export default function ModelView({ projectId, path, format, size, editable, onE
       if (!alive) return close(result);
       mine = result;
       setOpened(result);
-    })().catch((e) => alive && setError(String(e)));
+    })().catch((e) => alive && setError(errorText(e)));
     return () => {
       alive = false;
       if (mine) close(mine);
@@ -107,7 +109,7 @@ export default function ModelView({ projectId, path, format, size, editable, onE
       const result = await open(extension(source), (p) => api.readLocalBytes(p), slash(source), aux);
       setReplacement({ source, opened: result });
     } catch (e) {
-      setNote(`Couldn't read ${fileName(source)}: ${e}`);
+      setNote(`Couldn't read ${fileName(source)}: ${errorText(e)}`);
     }
   };
 
@@ -122,11 +124,11 @@ export default function ModelView({ projectId, path, format, size, editable, onE
       await api.saveLocalBytes(dest, bytes);
       setNote(`Saved ${fileName(dest)}. Open it in Blender or another 3D tool, then use Replace to put it back.`);
     } catch (e) {
-      setNote(`Couldn't export: ${e}`);
+      setNote(`Couldn't export: ${errorText(e)}`);
     }
   };
 
-  if (error) return <div className="preview muted">Couldn't show this model: {error}</div>;
+  if (error) return <div className="preview muted">Couldn't show this model: <ErrorText text={error} /></div>;
   if (!opened) return <div className="preview muted">Loading the 3D model ({formatBytes(size)})…</div>;
 
   const stats = modelStats(opened.model.root);
@@ -213,7 +215,7 @@ function ModelCanvas({ model, wireframe, clip }: { model: LoadedModel; wireframe
   useEffect(() => {
     const el = host.current!;
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
     el.appendChild(renderer.domElement);
     const scene = new THREE.Scene();
     scene.add(new THREE.HemisphereLight(0xffffff, 0x445566, 2));
@@ -327,7 +329,7 @@ function ReplaceDialog(props: {
       const label = `Replace ${fileName(path)} (from ${fileName(source)}${fit ? ", fitted" : ""})`;
       onClose(await api.saveFileBytes(projectId, path, bytes, label));
     } catch (e) {
-      setError(String(e));
+      setError(errorText(e));
       setBusy(false);
     }
   };
@@ -358,7 +360,7 @@ function ReplaceDialog(props: {
             <li>Saved as an edit you can undo; Build APK puts it in the game.</li>
           </ul>
         )}
-        {error && <div className="panel error small">{error}</div>}
+        {error && <div className="panel error small"><ErrorText text={error} /></div>}
         <div className="modal-actions">
           <button onClick={() => onClose()} disabled={busy}>
             Cancel

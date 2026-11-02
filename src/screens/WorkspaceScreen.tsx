@@ -18,31 +18,41 @@ import {
   MousePointer2,
   Move,
   Package,
+  Pause,
   Pencil,
   Play,
   Plus,
+  Redo2,
   Replace,
   RotateCw,
   Scaling,
   Shapes,
   SlidersHorizontal,
   Sparkles,
+  StepForward,
   Trash2,
   Undo2,
   User,
+  Video,
   X,
 } from "lucide-react";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import AssetBrowser from "../components/gx/AssetBrowser";
 import { BehaviorView, EntityInspector, MultiInspector, ThingInspector } from "../components/gx/GxInspector";
+import type { PlayControls } from "../components/gx/Player";
 import type { GizmoMode } from "../components/gx/SceneView";
 import { pickFile } from "../lib/api";
-import { gx, type Behavior, type Entity, type Item, type ProjectIndex, type Scene, type Thing, type TranslationReport } from "../lib/gx";
+import { gx, type Behavior, type Entity, type Item, type Origin, type ProjectIndex, type Scene, type Thing, type TranslationReport } from "../lib/gx";
 import { allIds, duplicate, findEntity, group, insertEntity, removeEntity, reparent, transformOf, uniqueId, updateEntity, walk } from "../lib/gxscene";
+import { errorText } from "../lib/errors";
+import ErrorText from "../components/ErrorText";
 
 // three.js loads only when a scene is opened.
 const SceneView = lazy(() => import("../components/gx/SceneView"));
 const Player = lazy(() => import("../components/gx/Player"));
+
+const PLAY_START: PlayControls = { paused: false, speed: 1, steps: 0, free: false, restart: 0 };
+const SPEEDS = [0.25, 1, 4];
 
 // ---------------------------------------------------------------------------
 // The workspace
@@ -68,6 +78,8 @@ interface WorkspaceProps {
   addRequest?: { id: string; n: number };
   /** The top bar's Play / Game Projection; bumped. */
   playRequest?: number;
+  /** Open this scene (e.g. one just captured); a new `n` asks again. */
+  focusScene?: { scene: string; n: number };
   /** Play as soon as a scene is open (Game Projection chosen before the editor opened). */
   autoplay?: boolean;
   onAutoplayed?: () => void;
@@ -80,7 +92,7 @@ interface WorkspaceProps {
   onStatus?: (message: string) => void;
 }
 
-export default function Workspace({ path, report, visible, game, games, onClose, onBuild, addRequest, playRequest = 0, autoplay, onAutoplayed, onPlaying, onPlayReal, onSources, onStatus }: WorkspaceProps) {
+export default function Workspace({ path, report, visible, game, games, onClose, onBuild, addRequest, playRequest = 0, focusScene, autoplay, onAutoplayed, onPlaying, onPlayReal, onSources, onStatus }: WorkspaceProps) {
   const [showReport, setShowReport] = useState(report !== undefined);
   const [index, setIndex] = useState<ProjectIndex | null>(null);
   const [things, setThings] = useState<Record<string, Thing>>({});
@@ -92,11 +104,14 @@ export default function Workspace({ path, report, visible, game, games, onClose,
   const [snap, setSnap] = useState(true);
   const [showColliders, setShowColliders] = useState(false);
   const [undoLabel, setUndoLabel] = useState<string | null>(null);
+  const [redoLabel, setRedoLabel] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(0);
   const [showProblems, setShowProblems] = useState(false);
   /** The GameX engine is playing the open scene. */
   const [playing, setPlaying] = useState(false);
+  /** Pause, single steps, speed and the free camera while playing. */
+  const [controls, setControls] = useState<PlayControls>(PLAY_START);
   /** Bumped when an asset's file changes, so the view reads it again. */
   const [assetsVersion, setAssetsVersion] = useState(0);
   const [exportNote, setExportNote] = useState<string | null>(null);
@@ -105,6 +120,9 @@ export default function Workspace({ path, report, visible, game, games, onClose,
   const [openTabs, setOpenTabs] = useState<string[]>([]);
   const [sideScene, setSideScene] = useState<Scene | null>(null);
   const [sideTab, setSideTab] = useState<"inspector" | "hierarchy">("inspector");
+  /** Where each element came from and how faithful it is; and the hierarchy showing only what needs checking. */
+  const [origins, setOrigins] = useState<Record<string, Origin>>({});
+  const [checkOnly, setCheckOnly] = useState(false);
   const mainCursor = useRef<HTMLSpanElement>(null);
   const readAsset = useCallback((asset: string) => gx.readAsset(path, asset), [path]);
   const sideCursor = useRef<HTMLSpanElement>(null);
@@ -113,11 +131,12 @@ export default function Workspace({ path, report, visible, game, games, onClose,
 
   const loadAll = useCallback(
     async (sceneId?: string | null) => {
-      const idx = await gx.openProject(path);
-      const loaded = await Promise.all(idx.things.map((t) => gx.loadThing(path, t.id).catch(() => null)));
+      const { index: idx, things: loaded } = await gx.openWithThings(path);
+      gx.origins(path).then(setOrigins).catch(() => setOrigins({}));
       setIndex(idx);
       setUndoLabel(idx.undo ?? null);
-      setThings(Object.fromEntries(loaded.filter((t): t is Thing => t !== null).map((t) => [t.id, t])));
+      setRedoLabel(idx.redo ?? null);
+      setThings(Object.fromEntries(loaded.map((t) => [t.id, t])));
       setBehaviors({});
       const want = sceneId === undefined ? (idx.info.settings.startScene ?? idx.scenes[0]?.id ?? null) : sceneId;
       setScene(want && idx.scenes.some((s) => s.id === want) ? await gx.loadScene(path, want) : null);
@@ -127,8 +146,32 @@ export default function Workspace({ path, report, visible, game, games, onClose,
   );
 
   useEffect(() => {
-    loadAll().catch((e) => setError(String(e)));
+    // Opened to show a scene (just captured): that one, else the start scene.
+    loadAll(focusScene?.scene).catch((e) => setError(errorText(e)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loadAll]);
+
+  // Coming back on screen: the layer is read again, since other screens add to it
+  // (Capture level, another game). A scene asked for opens; else the one open stays.
+  const shownOnce = useRef(false);
+  const focused = useRef(0);
+  useEffect(() => {
+    if (!visible) return;
+    const wanted = focusScene && focusScene.n !== focused.current ? focusScene.scene : undefined;
+    if (focusScene) focused.current = focusScene.n;
+    if (!shownOnce.current) {
+      // The first time, loadAll above is already reading it (and opens the scene asked for).
+      shownOnce.current = true;
+      return;
+    }
+    queue.current
+      .then(() => loadAll(wanted ?? scene?.id ?? null))
+      .then(() => {
+        if (wanted) setSelection(null);
+      })
+      .catch((e) => setError(errorText(e)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible, focusScene?.n]);
 
   // The scene on screen is always one of the tabs.
   useEffect(() => {
@@ -182,14 +225,26 @@ export default function Workspace({ path, report, visible, game, games, onClose,
     }
   }, [neededBehaviors, behaviors, path]);
 
-  /** Scenes GameX didn't read from the game's own levels: a sprite catalogue, a captured level. */
-  const notALevel = (s: Scene | null) => !!s && (s.id === "catalogue" || s.id === "things" || s.id.startsWith("captured"));
+  /** The sprite catalogue of a game whose levels are built in its code: not a level at all. */
+  const notALevel = (s: Scene | null) => !!s && (s.id === "catalogue" || s.id === "things");
+  const captured = (s: Scene | null) => !!s && s.id.startsWith("captured");
+  const redrawn = (s: Scene | null) => !!s && s.id.startsWith("redrawn");
 
   /** The GameX engine plays levels it read; a game whose levels are in its code plays for real. */
   const play = () => {
     if (notALevel(scene)) return report_.current.onPlayReal?.();
+    setControls(PLAY_START);
     setPlaying(true);
   };
+  const stop = () => {
+    setPlaying(false);
+    setControls(PLAY_START);
+  };
+  const control = (change: Partial<PlayControls> | ((c: PlayControls) => Partial<PlayControls>)) =>
+    setControls((c) => ({ ...c, ...(typeof change === "function" ? change(c) : change) }));
+  const restart = () => control((c) => ({ restart: c.restart + 1, paused: false }));
+  const slower = () => control((c) => ({ speed: SPEEDS[Math.max(0, SPEEDS.indexOf(c.speed) - 1)] ?? 1 }));
+  const faster = () => control((c) => ({ speed: SPEEDS[Math.min(SPEEDS.length - 1, SPEEDS.indexOf(c.speed) + 1)] ?? 1 }));
 
   const save = (task: () => Promise<string | null>) => {
     setSaving((n) => n + 1);
@@ -197,10 +252,12 @@ export default function Workspace({ path, report, visible, game, games, onClose,
       .then(task)
       .then((label) => {
         setUndoLabel(label);
+        // A new change: nothing undone can come back.
+        setRedoLabel(null);
         setError(null);
       })
       .catch(async (e) => {
-        setError(`Not saved: ${e}`);
+        setError(`Not saved: ${errorText(e)}`);
         // Show what's really on disk.
         await loadAll(scene?.id ?? null).catch(() => {});
       })
@@ -358,7 +415,7 @@ export default function Workspace({ path, report, visible, game, games, onClose,
       setExportNote(parts.join(". ") + ".");
       onBuild();
     } catch (e) {
-      setError(`Couldn't send the changes to the game: ${e}`);
+      setError(`Couldn't send the changes to the game: ${errorText(e)}`);
     }
   };
 
@@ -371,7 +428,20 @@ export default function Workspace({ path, report, visible, game, games, onClose,
       setAssetsVersion((n) => n + 1);
       setError(null);
     } catch (e) {
-      setError(`Couldn't undo: ${e}`);
+      setError(`Couldn't undo: ${errorText(e)}`);
+    }
+  };
+
+  const redo = async () => {
+    try {
+      await queue.current;
+      const [redone] = await gx.redo(path);
+      if (!redone) return;
+      await loadAll(scene?.id ?? null);
+      setAssetsVersion((n) => n + 1);
+      setError(null);
+    } catch (e) {
+      setError(`Couldn't redo: ${errorText(e)}`);
     }
   };
 
@@ -411,12 +481,12 @@ export default function Workspace({ path, report, visible, game, games, onClose,
 
   const openScene = async (item: Item) => {
     try {
-      setPlaying(false);
+      stop();
       setSelection(null);
       setScene(await gx.loadScene(path, item.id));
       setStructure((n) => n + 1);
     } catch (e) {
-      setError(String(e));
+      setError(errorText(e));
     }
   };
 
@@ -448,7 +518,7 @@ export default function Workspace({ path, report, visible, game, games, onClose,
     try {
       setSideScene(await gx.loadScene(path, pick.id));
     } catch (e) {
-      setError(String(e));
+      setError(errorText(e));
     }
   };
 
@@ -464,9 +534,13 @@ export default function Workspace({ path, report, visible, game, games, onClose,
     if (!visible || playing) return;
     const onKey = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement;
-      if (target.closest("input, textarea, select")) return;
+      // Taken by the view (flying the camera with the right button held).
+      if (e.defaultPrevented || target.closest("input, textarea, select")) return;
       const k = e.key.toLowerCase();
-      if ((e.ctrlKey || e.metaKey) && k === "z") {
+      if ((e.ctrlKey || e.metaKey) && (k === "y" || (k === "z" && e.shiftKey))) {
+        e.preventDefault();
+        redo();
+      } else if ((e.ctrlKey || e.metaKey) && k === "z") {
         e.preventDefault();
         undo();
       } else if ((e.ctrlKey || e.metaKey) && k === "d") {
@@ -489,12 +563,53 @@ export default function Workspace({ path, report, visible, game, games, onClose,
     return () => window.removeEventListener("keydown", onKey);
   });
 
+  // Play keys, while the workspace is on screen. They're F keys so that every other key (Esc, R) reaches the game.
+  useEffect(() => {
+    if (!visible) return;
+    const onKey = (e: KeyboardEvent) => {
+      const ctrl = e.ctrlKey || e.metaKey;
+      const k = e.key;
+      // F5 would reload the window.
+      if (k === "F5") {
+        e.preventDefault();
+        if (e.shiftKey && ctrl) {
+          if (playing) restart();
+        } else if (e.shiftKey) {
+          if (playing) stop();
+        } else if (!playing && scene) play();
+        return;
+      }
+      if (!playing) return;
+      if (k === "F6") {
+        e.preventDefault();
+        control((c) => ({ paused: !c.paused }));
+      } else if (k === "F10") {
+        e.preventDefault();
+        control((c) => (c.paused ? { steps: c.steps + 1 } : { paused: true }));
+      } else if (k === "F8") {
+        e.preventDefault();
+        control((c) => ({ free: !c.free }));
+      } else if (ctrl && k === "[") {
+        e.preventDefault();
+        slower();
+      } else if (ctrl && k === "]") {
+        e.preventDefault();
+        faster();
+      } else if (ctrl && k === "0") {
+        e.preventDefault();
+        control({ speed: 1 });
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
+
   if (!index) {
     return (
       <div className="screen">
         {error ? (
           <>
-            <div className="panel error">{error}</div>
+            <div className="panel error"><ErrorText text={error} /></div>
             <button onClick={onClose}>Back to projects</button>
           </>
         ) : (
@@ -546,7 +661,7 @@ export default function Workspace({ path, report, visible, game, games, onClose,
               value={sideScene?.id ?? ""}
               onChange={(e) => {
                 const item = index.scenes.find((x) => x.id === e.target.value);
-                if (item) gx.loadScene(path, item.id).then(setSideScene).catch((err) => setError(String(err)));
+                if (item) gx.loadScene(path, item.id).then(setSideScene).catch((err) => setError(errorText(err)));
               }}
             >
               {index.scenes.map((x) => (
@@ -659,7 +774,9 @@ export default function Workspace({ path, report, visible, game, games, onClose,
                   const item = index.scenes.find((x) => x.id === name) ?? index.scenes.find((x) => x.name.toLowerCase() === name.toLowerCase());
                   return item ? gx.loadScene(path, item.id) : null;
                 }}
-                onStop={() => setPlaying(false)}
+                controls={controls}
+                onStop={stop}
+                onRestart={restart}
               />
             )}
           </main>
@@ -681,7 +798,7 @@ export default function Workspace({ path, report, visible, game, games, onClose,
     <div className="gx-workspace">
       {error && (
         <div className="panel error small gx-error">
-          {error}{" "}
+          <ErrorText text={error} />{" "}
           <button className="link" onClick={() => setError(null)}>
             Dismiss
           </button>
@@ -723,16 +840,18 @@ export default function Workspace({ path, report, visible, game, games, onClose,
           </button>
         </div>
       )}
-      {scene && notALevel(scene) && (
+      {scene && (notALevel(scene) || captured(scene) || redrawn(scene)) && (
         <div className="notice small gx-problems">
           <AlertTriangle size={14} />
           <span className="grow">
-            {scene.id.startsWith("captured")
-              ? "A level captured from the running game: its look and objects, to edit. Its gameplay is the real game's: Play runs the real game."
-              : "Not a level: this game builds its levels in its code, so this is its sprite catalogue. Play the real game in Live Preview, then use Capture level there to bring a level in."}
+            {redrawn(scene)
+              ? "Redrawn from the running game. In Play you control the player GameX found; walls are where the player never walked, and enemies walk the paths they walked in the game. The game's own AI runs live in Run original."
+              : captured(scene)
+                ? "A level captured from the running game (an older screenshot capture). Record level in Run original redraws levels tile by tile instead."
+                : "Not a level: this game builds its levels in its code, so this is its sprite catalogue. Play the real game in Run original, then use Record level there to redraw a level here."}
           </span>
           <button className="link" onClick={() => report_.current.onPlayReal?.()}>
-            Open Live Preview
+            Open Run original
           </button>
         </div>
       )}
@@ -877,11 +996,34 @@ export default function Workspace({ path, report, visible, game, games, onClose,
             <button className="icon-button" onClick={undo} disabled={!undoLabel} title={undoLabel ? `Undo: ${undoLabel} (Ctrl+Z)` : "Nothing to undo"}>
               <Undo2 size={16} />
             </button>
+            <button className="icon-button" onClick={redo} disabled={!redoLabel || playing} title={redoLabel ? `Redo: ${redoLabel} (Ctrl+Y)` : "Nothing to redo"}>
+              <Redo2 size={16} />
+            </button>
+            {playing && (
+              <>
+                <button className={controls.paused ? "icon-button active" : "icon-button"} onClick={() => control((c) => ({ paused: !c.paused }))} title={controls.paused ? "Resume (F6)" : "Pause (F6)"}>
+                  {controls.paused ? <Play size={16} /> : <Pause size={16} />}
+                </button>
+                <button className="icon-button" onClick={() => control((c) => (c.paused ? { steps: c.steps + 1 } : { paused: true }))} title="One frame (F10); pauses first">
+                  <StepForward size={16} />
+                </button>
+                <button className={controls.free ? "icon-button active" : "icon-button"} onClick={() => control((c) => ({ free: !c.free }))} title={controls.free ? "Back to the player (F8)" : "Free camera (F8): fly around while the game runs"}>
+                  <Video size={16} />
+                </button>
+                <select className="gx-speed" value={controls.speed} onChange={(e) => control({ speed: Number(e.target.value) })} title="Speed (Ctrl+[ slower, Ctrl+] faster, Ctrl+0 normal)">
+                  {SPEEDS.map((s) => (
+                    <option key={s} value={s}>
+                      ×{s}
+                    </option>
+                  ))}
+                </select>
+              </>
+            )}
             {scene && (
               <button
                 className={playing ? "primary gx-play active" : "primary gx-play"}
-                onClick={() => (playing ? setPlaying(false) : play())}
-                title={playing ? "Stop (Esc)" : notALevel(scene) ? "Play the real game (this game's levels are built in its code)" : "Test play with the GameX engine (generic rules, not the original game's)"}
+                onClick={() => (playing ? stop() : play())}
+                title={playing ? "Stop (Shift+F5)" : notALevel(scene) ? "Play the real game; this game's levels are built in its code (F5)" : "Test play with the GameX engine, generic rules, not the original game's (F5)"}
               >
                 {playing ? <X size={15} /> : <Play size={15} />} {playing ? "Stop" : "Play"}
               </button>
@@ -931,7 +1073,12 @@ export default function Workspace({ path, report, visible, game, games, onClose,
                   <strong className="grow">{scene.name}</strong>
                   <span className="count">{walk(scene.entities).length}</span>
                 </div>
-                <Outline entities={scene.entities} things={things} selected={selectedIds} onSelect={select} onMove={moveUnder} onToggle={toggleVisible} />
+                {Object.keys(origins).length > 0 && (
+                  <label className="gx-check-only small" title="Show only what was rebuilt to act alike or not translated yet: what to compare with the original first">
+                    <input type="checkbox" checked={checkOnly} onChange={(e) => setCheckOnly(e.target.checked)} /> Only what needs checking
+                  </label>
+                )}
+                <Outline entities={checkOnly ? needsChecking(scene.entities, origins) : scene.entities} things={things} selected={selectedIds} onSelect={select} onMove={moveUnder} onToggle={toggleVisible} />
                 <div
                   className="gx-drop-top muted tiny"
                   onDragOver={(e) => e.preventDefault()}
@@ -948,6 +1095,8 @@ export default function Workspace({ path, report, visible, game, games, onClose,
               <p className="muted small gx-inspector">Open a map or level to see what's in it.</p>
             )
           ) : selectedEntity ? (
+            <>
+            <Faithful origin={originOf(origins, selectedEntity.id, selectedEntity.thing)} />
             <EntityInspector
               key={selectedEntity.id}
               entity={selectedEntity}
@@ -960,9 +1109,12 @@ export default function Workspace({ path, report, visible, game, games, onClose,
               readAsset={readAsset}
               onReplace={replaceAsset}
             />
+            </>
           ) : selectedEntities.length > 1 ? (
             <MultiInspector entities={selectedEntities} onGroup={groupSelected} onDuplicate={duplicateSelected} onDelete={deleteSelected} />
           ) : selection?.kind === "thing" && things[selection.id] ? (
+            <>
+            <Faithful origin={originOf(origins, null, selection.id)} />
             <ThingInspector
               key={selection.id}
               thing={things[selection.id]}
@@ -974,6 +1126,7 @@ export default function Workspace({ path, report, visible, game, games, onClose,
               readAsset={readAsset}
               onReplace={replaceAsset}
             />
+            </>
           ) : selection?.kind === "behavior" ? (
             <div className="gx-inspector">
               <BehaviorView id={selection.id} behavior={behaviors[selection.id]} />
@@ -985,7 +1138,7 @@ export default function Workspace({ path, report, visible, game, games, onClose,
               <p>
                 <strong>W</strong> move · <strong>E</strong> turn · <strong>R</strong> resize · <strong>F</strong> frame (in the view) ·{" "}
                 <strong>Del</strong> delete · <strong>Ctrl+D</strong> duplicate · <strong>Ctrl+G</strong> group ·{" "}
-                <strong>Ctrl+click</strong> pick several · <strong>Ctrl+Z</strong> undo
+                <strong>Ctrl+click</strong> pick several · <strong>Ctrl+Z</strong> undo · <strong>Ctrl+Y</strong> redo · <strong>F5</strong> play
               </p>
             </div>
           )}
@@ -1121,5 +1274,40 @@ function OutlineRow({ entity, things, selected, onSelect, onMove, onToggle, dept
         <Outline entities={entity.children!} things={things} selected={selected} onSelect={onSelect} onMove={onMove} onToggle={onToggle} depth={depth + 1} />
       )}
     </>
+  );
+}
+/** An entity's origin (or, failing that, its thing's), as the readers record them. */
+function originOf(origins: Record<string, Origin>, entityId: string | null, thingId?: string | null): Origin | undefined {
+  if (entityId) {
+    const key = Object.keys(origins).find((k) => k.startsWith("entity:") && k.endsWith(`:${entityId}`));
+    if (key) return origins[key];
+  }
+  return thingId ? origins[`thing:${thingId}`] : undefined;
+}
+
+/** The entities worth comparing with the original (rebuilt or not translated), with their parents. */
+function needsChecking(entities: Entity[], origins: Record<string, Origin>): Entity[] {
+  return entities.flatMap((e) => {
+    const children = needsChecking(e.children ?? [], origins);
+    const o = originOf(origins, e.id, e.thing);
+    return (o && o.fidelity !== "exact") || children.length ? [{ ...e, children }] : [];
+  });
+}
+
+const FAITHFUL: Record<Origin["fidelity"], { label: string; detail: string }> = {
+  exact: { label: "Same as original", detail: "Read from the game without changes." },
+  approximated: { label: "Close", detail: "Rebuilt to act alike: worth checking against the original." },
+  missing: { label: "Not translated", detail: "Found in the game, but GameX can't do this part yet." },
+};
+
+/** How faithful the selected element is to the original game, in words. */
+function Faithful({ origin }: { origin?: Origin }) {
+  if (!origin) return null;
+  const f = FAITHFUL[origin.fidelity];
+  return (
+    <div className={`gx-faithful ${origin.fidelity}`} title={`From ${origin.file}${origin.object ? ` (${origin.object})` : ""}`}>
+      <strong>{f.label}</strong> <span className="muted small">{f.detail}</span>
+      {origin.note && <span className="muted tiny"> {origin.note}</span>}
+    </div>
   );
 }

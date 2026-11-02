@@ -113,33 +113,6 @@ pub fn create(root: &Path, name: &str) -> io::Result<PathBuf> {
     Ok(dir)
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProjectEntry {
-    pub path: String,
-    pub name: String,
-    pub sources: usize,
-    pub modified: u64,
-}
-
-/// The projects in `root`, most recently changed first.
-pub fn list(root: &Path) -> io::Result<Vec<ProjectEntry>> {
-    let mut out = Vec::new();
-    let Ok(dirs) = fs::read_dir(root) else { return Ok(out) };
-    for dir in dirs.flatten() {
-        let path = dir.path();
-        let Ok(info) = read_json::<ProjectInfo>(&path.join(PROJECT_FILE)) else { continue };
-        let modified = fs::metadata(path.join(PROJECT_FILE))
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map_or(0, |d| d.as_secs());
-        out.push(ProjectEntry { path: path.display().to_string(), name: info.name, sources: info.sources.len(), modified });
-    }
-    out.sort_by_key(|p| std::cmp::Reverse(p.modified));
-    Ok(out)
-}
-
 // ---------------------------------------------------------------------------
 // Opening: an index of everything in the project
 
@@ -177,6 +150,9 @@ pub struct ProjectIndex {
     /// What Undo would take back.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub undo: Option<String>,
+    /// What Redo would bring back.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub redo: Option<String>,
 }
 
 fn rel(dir: &Path, path: &Path) -> String {
@@ -194,8 +170,19 @@ fn files_ending(dir: &Path, sub: &str, ext: &str) -> Vec<PathBuf> {
     out
 }
 
+/// Only the project's own settings and sources (`project.json`).
+pub fn read_info(dir: &Path) -> io::Result<ProjectInfo> {
+    read_json(&dir.join(PROJECT_FILE))
+}
+
 /// Reads a project folder: what's in it, and what's wrong with it.
 pub fn open(dir: &Path) -> io::Result<ProjectIndex> {
+    open_with_things(dir).map(|(index, _)| index)
+}
+
+/// The index, and every thing read while checking it (so the editor needn't
+/// read them again one by one).
+pub fn open_with_things(dir: &Path) -> io::Result<(ProjectIndex, Vec<Thing>)> {
     let info: ProjectInfo = read_json(&dir.join(PROJECT_FILE)).map_err(|e| match e.kind() {
         io::ErrorKind::NotFound => invalid(format!("{} isn't a GameX project (no {PROJECT_FILE}).", dir.display())),
         _ => e,
@@ -328,7 +315,7 @@ pub fn open(dir: &Path) -> io::Result<ProjectIndex> {
         }
     }
 
-    Ok(ProjectIndex {
+    let index = ProjectIndex {
         path: dir.display().to_string(),
         info,
         scenes,
@@ -338,7 +325,9 @@ pub fn open(dir: &Path) -> io::Result<ProjectIndex> {
         assets,
         problems,
         undo: History::new(dir).last()?,
-    })
+        redo: History::new(dir).next_redo()?,
+    };
+    Ok((index, thing_data.into_iter().map(|(_, t)| t).collect()))
 }
 
 // ---------------------------------------------------------------------------
@@ -439,7 +428,8 @@ pub fn save_info(dir: &Path, info: &ProjectInfo, summary: &str) -> io::Result<()
 }
 
 // ---------------------------------------------------------------------------
-// Undo: each save keeps what it replaced in history/
+// Undo: each save keeps what it replaced in history/. Undo keeps what it
+// replaced in turn (history/redo.json), until a new change is saved.
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Step {
@@ -475,16 +465,68 @@ impl History {
         }
     }
 
+    fn redo_path(&self) -> PathBuf {
+        self.dir.join("history").join("redo.json")
+    }
+
+    fn load_redo(&self) -> io::Result<Vec<Step>> {
+        match fs::read_to_string(self.redo_path()) {
+            Ok(text) => serde_json::from_str(&text).map_err(|e| invalid(format!("history/redo.json: {e}"))),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// A copy of `path` in history/, or None if there's no such file.
+    fn snapshot(&self, path: &Path) -> io::Result<Option<String>> {
+        if !path.is_file() {
+            return Ok(None);
+        }
+        let name = format!("{}.json", uuid::Uuid::new_v4().simple());
+        fs::create_dir_all(self.dir.join("history"))?;
+        fs::copy(path, self.dir.join("history").join(&name))?;
+        Ok(Some(name))
+    }
+
+    /// Puts `snap` (or nothing) back at `path`, and lets the copy go.
+    fn restore(&self, path: &Path, snap: &Option<String>) -> io::Result<()> {
+        match snap {
+            Some(name) => {
+                let snap = self.dir.join("history").join(name);
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::copy(&snap, path)?;
+                let _ = fs::remove_file(snap);
+            }
+            None => match fs::remove_file(path) {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+                _ => {}
+            },
+        }
+        Ok(())
+    }
+
+    /// A new change: what was undone can't come back any more.
+    fn forget_redo(&self) -> io::Result<()> {
+        let redo = self.load_redo()?;
+        if redo.is_empty() {
+            return Ok(());
+        }
+        for name in redo.iter().filter_map(|s| s.before.as_ref()) {
+            let _ = fs::remove_file(self.dir.join("history").join(name));
+        }
+        fs::remove_file(self.redo_path())
+    }
+
     fn keep(&self, path: &Path, summary: &str, group: u64) -> io::Result<()> {
+        self.forget_redo()?;
+        self.log(path, summary, group)
+    }
+
+    fn log(&self, path: &Path, summary: &str, group: u64) -> io::Result<()> {
         let mut log = self.load()?;
-        let before = if path.is_file() {
-            let name = format!("{}.json", uuid::Uuid::new_v4().simple());
-            fs::create_dir_all(self.dir.join("history"))?;
-            fs::copy(path, self.dir.join("history").join(&name))?;
-            Some(name)
-        } else {
-            None
-        };
+        let before = self.snapshot(path)?;
         let at = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
         log.push(Step { file: rel(&self.dir, path), before, summary: summary.into(), at, group });
         write_json(&self.log_path(), &log)
@@ -511,31 +553,47 @@ impl History {
         Ok(self.load()?.pop().map(|s| s.summary))
     }
 
+    /// What Redo would bring back.
+    pub fn next_redo(&self) -> io::Result<Option<String>> {
+        Ok(self.load_redo()?.pop().map(|s| s.summary))
+    }
+
     /// Takes back the newest change. Returns its summary, or None if there's nothing to undo.
     pub fn undo(&self) -> io::Result<Option<String>> {
         let mut log = self.load()?;
         let Some(group) = log.last().map(|s| s.group) else { return Ok(None) };
+        let mut redo = self.load_redo()?;
+        let redo_group = redo.last().map_or(1, |s| s.group + 1);
         let mut summary = None;
         while log.last().is_some_and(|s| s.group == group) {
             let step = log.pop().unwrap();
             let path = self.dir.join(&step.file);
-            match &step.before {
-                Some(name) => {
-                    let snap = self.dir.join("history").join(name);
-                    if let Some(parent) = path.parent() {
-                        fs::create_dir_all(parent)?;
-                    }
-                    fs::copy(&snap, &path)?;
-                    let _ = fs::remove_file(snap);
-                }
-                None => match fs::remove_file(&path) {
-                    Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
-                    _ => {}
-                },
-            }
+            // What the change made, for Redo.
+            let after = self.snapshot(&path)?;
+            self.restore(&path, &step.before)?;
+            redo.push(Step { file: step.file, before: after, summary: step.summary.clone(), at: step.at, group: redo_group });
             summary = Some(step.summary);
         }
         write_json(&self.log_path(), &log)?;
+        write_json(&self.redo_path(), &redo)?;
+        Ok(summary)
+    }
+
+    /// Brings back the change Undo took back last. Returns its summary, or None if there's nothing to redo.
+    pub fn redo(&self) -> io::Result<Option<String>> {
+        let mut redo = self.load_redo()?;
+        let Some(group) = redo.last().map(|s| s.group) else { return Ok(None) };
+        let undo_group = self.next_group()?;
+        let mut summary = None;
+        // Undo stored them newest first, so they come off in the order they were saved.
+        while redo.last().is_some_and(|s| s.group == group) {
+            let step = redo.pop().unwrap();
+            let path = self.dir.join(&step.file);
+            self.log(&path, &step.summary, undo_group)?;
+            self.restore(&path, &step.before)?;
+            summary = Some(step.summary);
+        }
+        write_json(&self.redo_path(), &redo)?;
         Ok(summary)
     }
 }
@@ -565,14 +623,13 @@ mod tests {
     }
 
     #[test]
-    fn creates_lists_and_opens_projects() {
+    fn creates_and_opens_projects() {
         let root = tempfile::tempdir().unwrap();
         let a = create(root.path(), "My Game").unwrap();
         let b = create(root.path(), "My Game").unwrap();
         assert_eq!(a.file_name().unwrap(), "My Game");
         assert_eq!(b.file_name().unwrap(), "My Game (2)");
         assert!(a.join("things/characters").is_dir() && a.join("assets/models").is_dir());
-        assert_eq!(list(root.path()).unwrap().len(), 2);
         let index = open(&a).unwrap();
         assert_eq!(index.info.name, "My Game");
         assert!(index.problems.is_empty() && index.scenes.is_empty() && index.undo.is_none());
@@ -601,6 +658,22 @@ mod tests {
         assert_eq!(history.undo().unwrap().as_deref(), Some("Add Crate"));
         assert_eq!(history.undo().unwrap(), None);
         assert!(open(&dir).unwrap().things.is_empty());
+
+        // Redo brings them back in order, and Undo works on them again.
+        assert_eq!(open(&dir).unwrap().redo.as_deref(), Some("Add Crate"));
+        assert_eq!(history.redo().unwrap().as_deref(), Some("Add Crate"));
+        assert_eq!(history.redo().unwrap().as_deref(), Some("Add Yard"));
+        assert_eq!(history.redo().unwrap().as_deref(), Some("Move Crate"));
+        assert_eq!(history.redo().unwrap(), None);
+        assert_eq!(load_scene(&dir, "yard").unwrap().entities[0].transform.position, [2.0, 0.0, 0.0]);
+        assert_eq!(history.undo().unwrap().as_deref(), Some("Move Crate"));
+        assert_eq!(load_scene(&dir, "yard").unwrap().entities[0].transform.position, [0.0; 3]);
+
+        // A new change means what was undone can't come back.
+        save_thing(&dir, &Thing { name: "Box".into(), ..crate_thing() }, "Rename Crate").unwrap();
+        assert_eq!(history.next_redo().unwrap(), None);
+        assert_eq!(history.redo().unwrap(), None);
+        assert!(!dir.join("history/redo.json").exists());
     }
 
     #[test]

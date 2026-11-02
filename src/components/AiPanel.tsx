@@ -14,6 +14,8 @@ import { useRef, useState } from "react";
 import { api } from "../lib/api";
 import type { AiStatus, Answer, EditState, Explanation, Proposal, TokenUsage } from "../lib/types";
 import Markdown from "./Markdown";
+import { errorText } from "../lib/errors";
+import ErrorText from "./ErrorText";
 
 interface Props {
   projectId: string;
@@ -108,7 +110,7 @@ export default function AiPanel({ projectId, path, selection, status, onEdited, 
       const value = await action();
       return { value, seconds: Math.max(1, Math.round((performance.now() - started) / 1000)) };
     } catch (e) {
-      setError(String(e));
+      setError(errorText(e));
       return null;
     } finally {
       setBusy(null);
@@ -253,7 +255,7 @@ export default function AiPanel({ projectId, path, selection, status, onEdited, 
         {fileName} is sent to {status.providerLabel} only when you click. Enter sends, Shift+Enter adds a line.
       </p>
 
-      {error && <div className="panel error small">{error}</div>}
+      {error && <div className="panel error small"><ErrorText text={error} /></div>}
       {busy && busy !== "apply" && <div className="ai-working">Waiting for {status.model}…</div>}
 
       {current && (

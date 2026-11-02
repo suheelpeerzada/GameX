@@ -1,6 +1,6 @@
 [package]
 name = "gamex"
-version = "1.0.0"
+version = "1.0.1"
 description = "Import offline games and edit their content in one universal editor"
 edition = "2021"
 
@@ -25,8 +25,23 @@ uuid = { version = "1", features = ["v4"] }
 imagesize = "0.13"
 base64 = "0.22"
 flate2 = "1"
+png = "0.18"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 keyring = { version = "3", features = ["windows-native"] }
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
 
 [dev-dependencies]
 tempfile = "3"
+
+# Dependencies (JSON, PNG, ZIP, hashing) built optimised in development too,
+# so `tauri dev` reads games about as fast as the installed app.
+[profile.dev.package."*"]
+opt-level = 2
+
+# Smaller, faster release builds. Panics stay catchable (no panic = "abort"):
+# a reader tripping over one odd game file fails that command, not the whole app.
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

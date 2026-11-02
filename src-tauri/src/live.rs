@@ -148,6 +148,15 @@ pub fn position_pair(fields: &[(&str, &str)]) -> Option<(usize, usize)> {
     best.map(|(i, j, _)| (i, j))
 }
 
+/// A class's name as lowercase words: `com.g.PlayerShip` -> player, ship.
+pub fn words(class: &str) -> Vec<String> {
+    name_words(class.rsplit(['.', '$']).next().unwrap_or(class))
+}
+
+fn error_class(class: &str) -> String {
+    format!("{class} isn't loaded in the game.")
+}
+
 /// `com.x.Enemy` <-> `Lcom/x/Enemy;`
 fn signature_of(class: &str) -> String {
     format!("L{};", class.replace('.', "/"))
@@ -242,6 +251,89 @@ impl LiveSession {
             }
         }
         Ok(out)
+    }
+
+    /// Every static field of a class with its value; `None` while the class isn't loaded.
+    pub fn statics_of(&mut self, class: &str) -> io::Result<Option<HashMap<String, Value>>> {
+        let Some(type_id) = self.class_id(class)? else { return Ok(None) };
+        let fields: Vec<FieldInfo> = self.fields_of(type_id)?.into_iter().filter(|f| f.is_static).collect();
+        let refs: Vec<&FieldInfo> = fields.iter().collect();
+        let values = self.values(0, type_id, &refs)?;
+        Ok(Some(fields.iter().zip(values).map(|(f, (_, v))| (f.name.clone(), v)).collect()))
+    }
+
+    /// Sets a static int field.
+    pub fn set_static_int(&mut self, class: &str, name: &str, v: i32) -> io::Result<()> {
+        let type_id = self.class_id(class)?.ok_or_else(|| io::Error::other(error_class(class)))?;
+        let fields = self.fields_of(type_id)?;
+        let f = fields
+            .iter()
+            .find(|f| f.is_static && f.name == name && f.signature == "I")
+            .ok_or_else(|| io::Error::other(format!("{class} has no int field {name}.")))?;
+        let mut w = self.vm.writer();
+        w.reference_type(type_id).u32(1).field(f.id);
+        w.untagged(b'I', &Value::Int(v as i64))?;
+        self.vm.command(3, 2, &w.data)?;
+        Ok(())
+    }
+
+    /// Part of a primitive array, as raw big-endian values (4 bytes each).
+    fn region(&mut self, array: u64, first: usize, len: usize) -> io::Result<Vec<u8>> {
+        let mut out = Vec::with_capacity(len * 4);
+        // In pieces, so no one reply is huge.
+        const STEP: usize = 1 << 18;
+        let mut at = first;
+        while at < first + len {
+            let n = STEP.min(first + len - at);
+            let mut w = self.vm.writer();
+            w.object(array).u32(at as u32).u32(n as u32);
+            let data = self.vm.command(13, 2, &w.data)?;
+            let mut r = self.vm.reader(&data);
+            let tag = r.u8()?;
+            let count = r.u32()? as usize;
+            if !matches!(tag, b'I' | b'F') || count != n || data.len() < 5 + n * 4 {
+                return Err(io::Error::other("The game's array isn't what GameX expected."));
+            }
+            out.extend_from_slice(&data[5..5 + n * 4]);
+            at += n;
+        }
+        Ok(out)
+    }
+
+    pub fn int_region(&mut self, array: u64, first: usize, len: usize) -> io::Result<Vec<i32>> {
+        Ok(self.region(array, first, len)?.as_chunks::<4>().0.iter().map(|c| i32::from_be_bytes([c[0], c[1], c[2], c[3]])).collect())
+    }
+
+    pub fn float_region(&mut self, array: u64, first: usize, len: usize) -> io::Result<Vec<f32>> {
+        Ok(self.region(array, first, len)?.as_chunks::<4>().0.iter().map(|c| f32::from_be_bytes([c[0], c[1], c[2], c[3]])).collect())
+    }
+
+    /// Stops every thread of the game: time stands still.
+    pub fn suspend(&mut self) -> io::Result<()> {
+        self.vm.command(1, 8, &[]).map(|_| ())
+    }
+
+    pub fn resume(&mut self) -> io::Result<()> {
+        self.vm.command(1, 9, &[]).map(|_| ())
+    }
+
+    /// Puts an object at (x, y) in the game's units, through its position fields.
+    pub fn move_object(&mut self, object: u64, x: f64, y: f64) -> Result<(), String> {
+        let io = |e: io::Error| e.to_string();
+        let type_id = self.object_type(object).map_err(io)?;
+        let fields: Vec<FieldInfo> = self.fields_of(type_id).map_err(io)?.into_iter().filter(|f| !f.is_static).collect();
+        let named: Vec<(&str, &str)> = fields.iter().map(|f| (f.name.as_str(), f.signature.as_str())).collect();
+        let (xi, yi) = position_pair(&named).ok_or("This object has no position fields GameX recognizes.")?;
+        let mut w = self.vm.writer();
+        w.object(object).u32(2);
+        for (f, v) in [(&fields[xi], x), (&fields[yi], y)] {
+            w.field(f.id);
+            let tag = f.signature.as_bytes()[0];
+            let value = if matches!(tag, b'F' | b'D') { Value::Float(v) } else { Value::Int(v.round() as i64) };
+            w.untagged(tag, &value).map_err(io)?;
+        }
+        self.vm.command(9, 3, &w.data).map_err(io)?;
+        Ok(())
     }
 
     fn instance_ids(&mut self, type_id: u64, max: u32) -> io::Result<Vec<u64>> {

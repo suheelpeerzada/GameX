@@ -16,6 +16,8 @@ import {
   type Vec2,
 } from "../lib/godot";
 import type { EditState, Scene, SceneNode, SceneProperty } from "../lib/types";
+import { errorText } from "../lib/errors";
+import ErrorText from "./ErrorText";
 
 interface Props {
   projectId: string;
@@ -84,7 +86,7 @@ export default function SceneEditor({ projectId, path, editable, revision, onEdi
         setDragged(null);
         setError(null);
       })
-      .catch((e) => current && setError(String(e)));
+      .catch((e) => current && setError(errorText(e)));
     return () => {
       current = false;
     };
@@ -190,7 +192,7 @@ export default function SceneEditor({ projectId, path, editable, revision, onEdi
     try {
       onEdited(await api.sceneSet(projectId, path, node, changes));
     } catch (e) {
-      setError(String(e));
+      setError(errorText(e));
       setDragged(null);
     }
   };
@@ -273,7 +275,7 @@ export default function SceneEditor({ projectId, path, editable, revision, onEdi
     });
   };
 
-  if (error && !scene) return <div className="panel error small">{error}</div>;
+  if (error && !scene) return <div className="panel error small"><ErrorText text={error} /></div>;
   if (!scene) return <div className="preview muted">Reading the scene…</div>;
 
   const pixel = view && svgRef.current ? view.w / Math.max(1, svgRef.current.clientWidth) : 1;
@@ -285,7 +287,7 @@ export default function SceneEditor({ projectId, path, editable, revision, onEdi
       {!editable && (
         <div className="notice small">This copy is read-only. Open the editable copy of this scene to make changes.</div>
       )}
-      {error && <div className="panel error small">{error}</div>}
+      {error && <div className="panel error small"><ErrorText text={error} /></div>}
       <div className="scene-main">
         <ul className="scene-tree">
           {scene.nodes.map((n) => (

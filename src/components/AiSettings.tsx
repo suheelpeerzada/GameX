@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { api, inDesktopApp } from "../lib/api";
 import type { AiStatus, ModelInfo } from "../lib/types";
+import { errorText } from "../lib/errors";
+import ErrorText from "./ErrorText";
 
 /** API key and model for the optional AI assistant. */
 export default function AiSettings() {
@@ -14,7 +16,7 @@ export default function AiSettings() {
     if (!inDesktopApp) return;
     api.aiStatus().then((s) => {
       setStatus(s);
-      if (s.provider) api.aiModels().then(setModels).catch((e) => setError(String(e)));
+      if (s.provider) api.aiModels().then(setModels).catch((e) => setError(errorText(e)));
     });
   }, []);
 
@@ -27,7 +29,7 @@ export default function AiSettings() {
       setModels(result.models);
       setKey("");
     } catch (e) {
-      setError(String(e));
+      setError(errorText(e));
     } finally {
       setBusy(false);
     }
@@ -40,7 +42,7 @@ export default function AiSettings() {
       setStatus(await api.aiClearKey());
       setModels([]);
     } catch (e) {
-      setError(String(e));
+      setError(errorText(e));
     }
   };
 
@@ -49,7 +51,7 @@ export default function AiSettings() {
     try {
       setStatus(await api.aiSetModel(model));
     } catch (e) {
-      setError(String(e));
+      setError(errorText(e));
     }
   };
 
@@ -114,7 +116,7 @@ export default function AiSettings() {
           </button>
         </div>
       )}
-      {error && <p className="small error-text">{error}</p>}
+      {error && <p className="small error-text"><ErrorText text={error} /></p>}
     </section>
   );
 }
